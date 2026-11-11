@@ -1,5 +1,6 @@
 import type { PromptResponse } from "@agentclientprotocol/sdk/unstable";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai";
+import { calculateCost } from "@earendil-works/pi-ai";
 
 export function emptyUsage(): Usage {
 	return {
@@ -12,7 +13,7 @@ export function emptyUsage(): Usage {
 	};
 }
 
-export function usageFromPrompt(response: PromptResponse): Usage {
+export function usageFromPrompt(response: PromptResponse, model?: Model<string>): Usage {
 	const usage = emptyUsage();
 	const standard = asRecord(response.usage);
 	const quota = asRecord(asRecord(response._meta)?.quota);
@@ -25,6 +26,7 @@ export function usageFromPrompt(response: PromptResponse): Usage {
 	usage.output = (token(tokens?.output_tokens) ?? token(standard?.outputTokens) ?? 0) + (reasoning ?? 0);
 	if (reasoning !== undefined) usage.reasoning = reasoning;
 	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	if (model) calculateCost(model, usage);
 	return usage;
 }
 

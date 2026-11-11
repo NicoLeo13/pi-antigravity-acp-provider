@@ -649,7 +649,7 @@ export class AntigravityRuntime {
 			if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
 			const activeWriter = binding.writer ?? writer;
 			if (binding.abortRequested) throw abortError();
-			const usage = usageFromPrompt(response);
+			const usage = usageFromPrompt(response, model);
 			this.metrics.record(response, usage);
 			// agy reports exhaustion as an ordinary reply; fail it before the turn is persisted.
 			const quota = usage.totalTokens === 0 || response.stopReason === "refusal"

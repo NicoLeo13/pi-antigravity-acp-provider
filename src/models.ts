@@ -12,6 +12,31 @@ const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 type Effort = "low" | "medium" | "high";
 type Variants = Partial<Record<Effort, string>>;
 
+/** Catalog rates in USD per million tokens, matching models.dev's Google / Vertex
+ * entries for these model families (retrieved 2026-11-11). Antigravity bills through
+ * a subscription, so these produce a reference estimate rather than a billed amount —
+ * the same estimate OpenCode shows for the same models. Unknown model families keep
+ * zero rates instead of guessing. */
+const FLASH_RATES: Model<typeof API_ID>["cost"] = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
+const ARGON_RATES: Model<typeof API_ID>["cost"] = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+const PRO_RATES = {
+	input: 2,
+	output: 12,
+	cacheRead: 0.2,
+	cacheWrite: 0,
+	tiers: [{ input: 4, output: 18, cacheRead: 0.4, cacheWrite: 0, inputTokensAbove: 200_000 }],
+};
+
+/** Resolve the catalog rates for a projected model id. Effort-qualified ids share the
+ * base model's rates, and `gemini-pro-agent` is Gemini 3.1 Pro under its agent name. */
+export function costRatesFor(modelId: string): Model<typeof API_ID>["cost"] {
+	const base = splitEffortSuffix(modelId)?.base ?? modelId;
+	if (/^gemini-3\.[678]-flash$/u.test(base)) return FLASH_RATES;
+	if (/^gemini-4-argon$/u.test(base)) return ARGON_RATES;
+	if (/^(gemini-3\.1-pro|gemini-pro-agent)$/u.test(base)) return PRO_RATES;
+	return ZERO_COST;
+}
+
 // Keep the broadly available Flash model first for offline/default selection.
 export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 	reasoningModel("gemini-3.8-flash", "Gemini 3.8 Flash", {
@@ -165,7 +190,7 @@ function baseModel(
 		reasoning,
 		...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 		input: ["text", "image"],
-		cost: ZERO_COST,
+		cost: costRatesFor(id),
 		contextWindow: 1_000_000,
 		maxTokens: 65_536,
 	};
