@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FALLBACK_MODELS, costRatesFor, projectModels } from "../src/models.js";
+import { FALLBACK_MODELS, costRatesFor, projectModels, resolveAcpModelId, splitEffortSuffix } from "../src/models.js";
 import { usageFromPrompt } from "../src/stream/usage.js";
 
 describe("costRatesFor", () => {
@@ -20,6 +20,17 @@ describe("costRatesFor", () => {
 		expect(rates.input).toBe(2);
 		expect(rates.tiers?.[0]).toEqual({ input: 4, output: 18, cacheRead: 0.4, cacheWrite: 0, inputTokensAbove: 200_000 });
 		expect(costRatesFor("gemini-pro-agent")).toEqual(rates);
+	});
+
+	it("rates Hydrogen at Google's published launch pricing, including the xhigh tier", () => {
+		const expected = { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 };
+		expect(costRatesFor("gemini-4-hydrogen")).toEqual(expected);
+		expect(costRatesFor("gemini-4-hydrogen-xhigh")).toEqual(expected);
+		expect(costRatesFor("gemini-4-hydrogen-low")).toEqual(expected);
+	});
+
+	it("rates Carbon at the models.dev catalog prices", () => {
+		expect(costRatesFor("gemini-4-carbon")).toEqual({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 });
 	});
 
 	it("keeps unknown families at zero rates instead of guessing", () => {
@@ -73,5 +84,33 @@ describe("projectModels keeps catalog rates through projection", () => {
 		]);
 		expect(models).toHaveLength(1);
 		expect(models[0]?.cost.input).toBe(0.75);
+	});
+});
+
+describe("xhigh tier handling", () => {
+	it("groups a server-advertised xhigh variant into the thinking map instead of emitting a fixed model", () => {
+		const models = projectModels([
+			{ modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)" },
+			{ modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)" },
+			{ modelId: "gemini-4-hydrogen-xhigh", name: "Gemini 4 Hydrogen (Xhigh)" },
+		]);
+		expect(models).toHaveLength(1);
+		expect(models[0]?.reasoning).toBe(true);
+		expect(models[0]?.thinkingLevelMap?.xhigh).toBe("gemini-4-hydrogen-xhigh");
+		expect(models[0]?.thinkingLevelMap?.max).toBeNull();
+	});
+
+	it("resolves xhigh to the xhigh id when present and clamps to high otherwise", () => {
+		const hydrogen = FALLBACK_MODELS.find((model) => model.id === "gemini-4-hydrogen")!;
+		const argon = FALLBACK_MODELS.find((model) => model.id === "gemini-4-argon")!;
+		expect(resolveAcpModelId(hydrogen, "xhigh")).toBe("gemini-4-hydrogen-xhigh");
+		expect(resolveAcpModelId(argon, "xhigh")).toBe("gemini-4-argon-high");
+		expect(resolveAcpModelId(argon, "high")).toBe("gemini-4-argon-high");
+		expect(resolveAcpModelId(argon, "medium")).toBe("gemini-4-argon-medium");
+	});
+
+	it("keeps splitEffortSuffix consistent with the new tier", () => {
+		expect(splitEffortSuffix("gemini-4-hydrogen-xhigh")).toEqual({ base: "gemini-4-hydrogen", effort: "xhigh" });
+		expect(splitEffortSuffix("gemini-4-hydrogen")).toBeUndefined();
 	});
 });
