@@ -16,7 +16,7 @@ import { PACKAGE_VERSION, PERMISSION_TOOL_NAME } from "../constants.js";
 import { projectToolSchema } from "./schema.js";
 
 const BODY_LIMIT = 1024 * 1024;
-const MAX_TOOLS = 64;
+const DEFAULT_PROGRESS_KEEPALIVE_MS = 15_000;
 
 interface BridgeTool {
 	mcpName: string;
@@ -35,6 +35,7 @@ export interface PiToolInvocation {
 export interface PiMcpBridgeOptions {
 	tools: readonly Tool[];
 	onCall: (invocation: PiToolInvocation) => Promise<CallToolResult>;
+	progressKeepaliveMs?: number;
 }
 
 export interface ToolOmission {
@@ -84,7 +85,7 @@ export class PiMcpBridge {
 				response.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "MCP bridge error" } }));
 			});
 		});
-		this.server.maxConnections = 8;
+		this.server.maxConnections = 64;
 		await new Promise<void>((resolve, reject) => {
 			this.server?.once("error", reject);
 			this.server?.listen(0, "127.0.0.1", resolve);
@@ -100,7 +101,10 @@ export class PiMcpBridge {
 		this.server = undefined;
 		this.url = undefined;
 		if (!server) return;
-		await new Promise<void>((resolve) => server.close(() => resolve()));
+		await new Promise<void>((resolve) => {
+			server.close(() => resolve());
+			server.closeAllConnections?.();
+		});
 	}
 
 	private descriptor(): AcpMcpServer {
@@ -134,7 +138,7 @@ export class PiMcpBridge {
 				inputSchema: tool.inputSchema as { type: "object"; properties?: Record<string, object> },
 			})),
 		}));
-		protocol.setRequestHandler(CallToolRequestSchema, async (call) => {
+		protocol.setRequestHandler(CallToolRequestSchema, async (call, extra) => {
 			const tool = this.tools.find((candidate) => candidate.mcpName === call.params.name);
 			if (!tool) return toolError("Unknown or inactive Pi tool");
 			const args = call.params.arguments ?? {};
@@ -145,7 +149,40 @@ export class PiMcpBridge {
 			} catch {
 				return toolError("The original Pi tool schema could not validate these arguments");
 			}
-			return this.options.onCall({ id: crypto.randomUUID(), name: tool.piName, arguments: args });
+			const progressToken = extra._meta?.progressToken;
+			let keepalive: ReturnType<typeof setInterval> | undefined;
+			const stopKeepalive = () => {
+				if (!keepalive) return;
+				clearInterval(keepalive);
+				keepalive = undefined;
+			};
+			if (typeof progressToken === "string" || typeof progressToken === "number") {
+				const sendProgress = () => {
+					if (extra.signal.aborted) {
+						stopKeepalive();
+						return;
+					}
+					void extra.sendNotification({
+						method: "notifications/progress",
+						params: {
+							progressToken,
+							progress: 0,
+							message: "Waiting for Pi tool execution",
+						},
+					}).catch(() => undefined);
+				};
+				sendProgress();
+				const intervalMs = Math.max(10, this.options.progressKeepaliveMs ?? DEFAULT_PROGRESS_KEEPALIVE_MS);
+				keepalive = setInterval(sendProgress, intervalMs);
+				keepalive.unref?.();
+				extra.signal.addEventListener("abort", stopKeepalive, { once: true });
+			}
+			try {
+				return await this.options.onCall({ id: crypto.randomUUID(), name: tool.piName, arguments: args });
+			} finally {
+				extra.signal.removeEventListener("abort", stopKeepalive);
+				stopKeepalive();
+			}
 		});
 		const transport = new StreamableHTTPServerTransport(
 			{ sessionIdGenerator: undefined } as unknown as ConstructorParameters<
@@ -167,10 +204,6 @@ function projectTools(tools: readonly Tool[], omissions: ToolOmission[]): Bridge
 	const names = new Set<string>();
 	for (const tool of tools) {
 		if (tool.name === PERMISSION_TOOL_NAME) continue;
-		if (output.length >= MAX_TOOLS) {
-			omissions.push({ name: tool.name, reason: `Tool limit ${MAX_TOOLS} reached` });
-			continue;
-		}
 		const mcpName = `pi_${tool.name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
 		if (!mcpName || names.has(mcpName)) {
 			omissions.push({ name: tool.name, reason: "duplicate or invalid projected name" });
