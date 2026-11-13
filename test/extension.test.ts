@@ -57,8 +57,12 @@ async function load(sessionId: string, events?: FakeExtensionApi["api"]["events"
 	const pi = createFakeExtensionApi(registry);
 	if (events) pi.api.events = events;
 	registerAntigravityAcp(pi.api, (options) => {
-		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
+		const connection = new AntigravityAcpConnection({
+			...options,
+			command: process.execPath,
+			args: [fakeAgent],
+			env: { ...process.env, ...options.env, FAKE_AGENT_LOG_FILE: log },
+		});
 		connections.push(connection);
 		return connection;
 	});
@@ -115,19 +119,19 @@ describe("extension entry point", () => {
 		expect(parentConnection!.process.alive).toBe(true);
 	});
 
-	it("resolves a permission parked through one instance with another instance's permission tool", async () => {
+	it("rejects non-bridge permissions immediately without parking the permission tool", async () => {
 		const parent = await load("parent");
 		const child = await load("child");
-		const parked = await stream([user("request permission")], "parent", parent.pi.providers[0]);
-		const call = parked.content.find((block) => block.type === "toolCall");
-		if (call?.type !== "toolCall") throw new Error("missing permission tool call");
+		const result = await stream([user("request permission")], "parent", parent.pi.providers[0]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "Decision: cancelled" }]);
 
 		const ctx = createFakeContext({ sessionId: "child", selectAnswer: (labels) => labels[0] });
 		const tool = child.pi.tools.get(PERMISSION_TOOL_NAME);
 		if (!tool) throw new Error("missing permission tool");
-		const result = await tool.execute("call", { requestId: call.id }, undefined, undefined, ctx as never);
-
-		expect(result.details).toMatchObject({ requestId: call.id, optionId: "allow-once", cancelled: false });
+		await expect(tool.execute("call", { requestId: "missing" }, undefined, undefined, ctx as never)).rejects.toThrow(
+			"missing, expired, or already used",
+		);
 	});
 
 	it("shares one provider across loads and closes it when the last instance quits", async () => {

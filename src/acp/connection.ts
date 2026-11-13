@@ -14,7 +14,7 @@ import {
 	type SessionNotification,
 } from "@agentclientprotocol/sdk/unstable";
 
-import { PACKAGE_VERSION } from "../constants.js";
+import { DEFAULT_MCP_MAX_OUTPUT_BYTES, PACKAGE_VERSION } from "../constants.js";
 import { boundedNdjsonStream } from "./bounded-stream.js";
 import { abortError, AntigravityAcpError, redact } from "./errors.js";
 import { AntigravityProcess, type AntigravityProcessOptions } from "./process.js";
@@ -29,6 +29,12 @@ import {
 } from "./session-state.js";
 
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+
+export interface AntigravitySessionMetaOptions {
+	systemInstructions?: string;
+	mcpMaxOutputBytes?: number;
+	eagerMcpServers?: string[];
+}
 
 export interface AntigravityConnectionHandlers {
 	onUpdate?: (notification: SessionNotification) => void | Promise<void>;
@@ -122,10 +128,7 @@ export class AntigravityAcpConnection {
 		this.initialized = this.withDeadline(
 			this.connection.agent.request(methods.agent.initialize, {
 				protocolVersion: PROTOCOL_VERSION,
-				clientCapabilities: {
-					fs: { readTextFile: false, writeTextFile: false },
-					terminal: false,
-				},
+				clientCapabilities: {},
 				clientInfo: {
 					name: "pi-antigravity-acp-provider",
 					title: "Pi Antigravity ACP Provider",
@@ -171,11 +174,16 @@ export class AntigravityAcpConnection {
 		cwd: string,
 		signal?: AbortSignal,
 		mcpServers: McpServer[] = [],
+		metaOptions?: AntigravitySessionMetaOptions,
 	): Promise<AcpNewSessionResponse> {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.new, { cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.new, {
+					cwd,
+					mcpServers,
+					_meta: buildSessionMeta(mcpServers, metaOptions),
+				}),
 				this.operationTimeoutMs,
 				"session/new",
 			),
@@ -194,11 +202,17 @@ export class AntigravityAcpConnection {
 		cwd: string,
 		mcpServers: McpServer[] = [],
 		signal?: AbortSignal,
+		metaOptions?: AntigravitySessionMetaOptions,
 	): Promise<SessionState> {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.load, { sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.load, {
+					sessionId,
+					cwd,
+					mcpServers,
+					_meta: buildSessionMeta(mcpServers, metaOptions),
+				}),
 				this.operationTimeoutMs,
 				"session/load",
 			),
@@ -212,11 +226,17 @@ export class AntigravityAcpConnection {
 		cwd: string,
 		mcpServers: McpServer[] = [],
 		signal?: AbortSignal,
+		metaOptions?: AntigravitySessionMetaOptions,
 	): Promise<SessionState> {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.resume, { sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.resume, {
+					sessionId,
+					cwd,
+					mcpServers,
+					_meta: buildSessionMeta(mcpServers, metaOptions),
+				}),
 				this.operationTimeoutMs,
 				"session/resume",
 			),
@@ -474,4 +494,24 @@ function structuredErrorDetail(data: unknown): string | undefined {
 	if (!data || typeof data !== "object") return undefined;
 	const detail = (data as { details?: unknown }).details;
 	return typeof detail === "string" && detail.trim() ? redact(detail.trim()) : undefined;
+}
+
+function buildSessionMeta(
+	mcpServers: McpServer[],
+	options?: AntigravitySessionMetaOptions,
+): { antigravity: Record<string, unknown> } {
+	const eagerMcpServers =
+		options?.eagerMcpServers ??
+		(mcpServers.length > 0
+			? mcpServers.map((server) => server.name).filter((name): name is string => typeof name === "string" && name.length > 0)
+			: ["pi-bridge"]);
+	const antigravity: Record<string, unknown> = {
+		enabledTools: [],
+		eagerMcpServers,
+		mcpMaxOutputBytes: options?.mcpMaxOutputBytes ?? DEFAULT_MCP_MAX_OUTPUT_BYTES,
+	};
+	if (options?.systemInstructions) {
+		antigravity.systemPrompt = { append: options.systemInstructions };
+	}
+	return { antigravity };
 }

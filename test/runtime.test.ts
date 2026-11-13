@@ -275,69 +275,32 @@ describe("AntigravityRuntime", () => {
 		}
 	});
 
-	it("parks a permission request and resumes it from a Pi tool result", async () => {
+	it("auto-approves pi-bridge permission requests and immediately rejects built-in tool permissions", async () => {
 		const runtime = new AntigravityRuntime(
 			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
 		);
 		try {
-			const firstContext: Context = {
-				messages: [{ role: "user", content: "request permission", timestamp: 1 }],
-			};
-			const firstWriter = runtime.stream(model, firstContext, {
-				sessionId: "permission-session",
-				apiKey: "test-key",
-			});
-			const firstEvents = [];
-			for await (const event of firstWriter.stream) firstEvents.push(event);
-			expect(firstEvents.map((event) => event.type)).toEqual([
-				"start",
-				"toolcall_start",
-				"toolcall_delta",
-				"toolcall_end",
-				"done",
-			]);
-			const firstMessage = firstEvents.at(-1);
-			if (firstMessage?.type !== "done") throw new Error("missing permission turn");
-			const toolCall = firstMessage.message.content.find((block) => block.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall") throw new Error("missing permission tool call");
-			const request = runtime.getPermission(toolCall.id);
-			expect(request?.options.map((option) => option.kind)).toEqual(["allow_once", "reject_once"]);
+			const bridgeWriter = runtime.stream(
+				model,
+				{ messages: [{ role: "user", content: "pi-bridge permission", timestamp: 1 }] },
+				{ sessionId: "permission-bridge", apiKey: "test-key" },
+			);
+			const bridgeEvents = [];
+			for await (const event of bridgeWriter.stream) bridgeEvents.push(event);
+			expect(bridgeEvents.some((event) => event.type === "toolcall_start")).toBe(false);
+			expect(bridgeWriter.message.stopReason).toBe("stop");
+			expect(bridgeWriter.message.content).toEqual([{ type: "text", text: "Decision: selected" }]);
 
-			const resumedContext: Context = {
-				messages: [
-					...firstContext.messages,
-					firstMessage.message,
-					{
-						role: "toolResult",
-						toolCallId: toolCall.id,
-						toolName: PERMISSION_TOOL_NAME,
-						content: [{ type: "text", text: "Rejected" }],
-						details: {
-							kind: PERMISSION_RESULT_KIND,
-							requestId: toolCall.id,
-							optionId: "reject-once",
-							cancelled: false,
-						},
-						isError: false,
-						timestamp: 2,
-					},
-				],
-			};
-			const secondWriter = runtime.stream(model, resumedContext, {
-				sessionId: "permission-session",
-				apiKey: "test-key",
-			});
-			const secondEvents = [];
-			for await (const event of secondWriter.stream) secondEvents.push(event);
-			expect(secondEvents.map((event) => event.type)).toEqual([
-				"start",
-				"text_start",
-				"text_delta",
-				"text_end",
-				"done",
-			]);
-			expect(secondWriter.message.content).toEqual([{ type: "text", text: "Decision: selected" }]);
-			expect(runtime.getPermission(toolCall.id)).toBeUndefined();
+			const nativeWriter = runtime.stream(
+				model,
+				{ messages: [{ role: "user", content: "request permission", timestamp: 2 }] },
+				{ sessionId: "permission-native", apiKey: "test-key" },
+			);
+			const nativeEvents = [];
+			for await (const event of nativeWriter.stream) nativeEvents.push(event);
+			expect(nativeEvents.some((event) => event.type === "toolcall_start")).toBe(false);
+			expect(nativeWriter.message.stopReason).toBe("stop");
+			expect(nativeWriter.message.content).toEqual([{ type: "text", text: "Decision: cancelled" }]);
 		} finally {
 			await runtime.close();
 		}

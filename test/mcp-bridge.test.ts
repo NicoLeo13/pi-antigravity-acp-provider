@@ -23,6 +23,11 @@ describe("PiMcpBridge", () => {
 		const bridge = new PiMcpBridge({ tools, onCall });
 		const descriptor = await bridge.start();
 		if (!descriptor || !("url" in descriptor)) throw new Error("bridge did not start");
+		expect(descriptor).toMatchObject({
+			type: "http",
+			name: "pi-bridge",
+			_meta: { antigravity: { forceAllToolsEager: true } },
+		});
 		const headers = Object.fromEntries(descriptor.headers.map((header) => [header.name, header.value]));
 		const client = new Client({ name: "bridge-test", version: "1" }, { capabilities: {} });
 		const transport = new StreamableHTTPClientTransport(new URL(descriptor.url), {

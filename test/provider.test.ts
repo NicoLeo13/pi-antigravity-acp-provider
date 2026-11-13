@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -12,10 +15,18 @@ const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta
 const model = FALLBACK_MODELS[0]!;
 
 describe("native Pi provider", () => {
-	it("passes transcript instructions through to the ACP prompt", async () => {
+	it("passes transcript instructions through _meta.antigravity.systemPrompt.append without duplicating them in session/prompt", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-provider-"));
+		const log = path.join(root, "calls.jsonl");
+		fs.writeFileSync(log, "");
 		const prompts: Array<Parameters<AntigravityAcpConnection["prompt"]>[0]> = [];
 		const runtime = new AntigravityRuntime((options) => {
-			const connection = new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] });
+			const connection = new AntigravityAcpConnection({
+				...options,
+				command: process.execPath,
+				args: [fakeAgent],
+				env: { ...process.env, ...options.env, FAKE_AGENT_LOG_FILE: log },
+			});
 			const prompt = connection.prompt.bind(connection);
 			connection.prompt = (request, signal) => {
 				prompts.push(request);
@@ -31,12 +42,20 @@ describe("native Pi provider", () => {
 			}), { apiKey: "test-key" });
 			const result = await stream.result();
 			expect(result.stopReason).toBe("stop");
-			expect(prompts[0]?.prompt[0]).toMatchObject({
-				type: "resource",
-				resource: { text: expect.stringContaining("Follow native transcript instructions") },
+			const entries = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { method: string; _meta?: unknown });
+			const newSession = entries.find((entry) => entry.method === "session/new");
+			expect(newSession?._meta).toMatchObject({
+				antigravity: {
+					enabledTools: [],
+					eagerMcpServers: ["pi-bridge"],
+					systemPrompt: { append: "Follow native transcript instructions" },
+				},
 			});
+			expect(JSON.stringify(prompts[0]?.prompt)).not.toContain("Follow native transcript instructions");
+			expect(prompts[0]?.prompt).toEqual([{ type: "text", text: "hello" }]);
 		} finally {
 			await runtime.close();
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 

@@ -28,6 +28,7 @@ import {
 } from "./acp/antigravity.js";
 import { AntigravityAcpConnection, type AntigravityConnectionOptions } from "./acp/connection.js";
 import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";
+import { prepareIsolatedAcpEnvironment } from "./acp/isolated-env.js";
 import { quotaExhaustion } from "./acp/quota.js";
 import { AcpSessionStore } from "./acp/session-store.js";
 import { sessionModels, sessionModes, type AcpModelInfo, type AcpNewSessionResponse, type SessionState } from "./acp/session-state.js";
@@ -35,6 +36,7 @@ import { parseUsageQuota, type AntigravityQuotaSnapshot } from "./acp/usage-quot
 import {
 	DEFAULT_BINDING_IDLE_MS,
 	DEFAULT_MAX_BINDINGS,
+	DEFAULT_MCP_MAX_OUTPUT_BYTES,
 	MANAGED_AUTH_MARKER,
 	PERMISSION_RESULT_KIND,
 	PERMISSION_TOOL_NAME,
@@ -57,7 +59,6 @@ import { PiEventWriter } from "./stream/pi-events.js";
 import { usageFromPrompt } from "./stream/usage.js";
 import { RuntimeMetrics } from "./status.js";
 
-const PERMISSION_TIMEOUT_MS = 120_000;
 const TOOL_BATCH_MS = 100;
 const QUOTA_CACHE_MS = 60_000;
 const QUOTA_TIMEOUT_MS = 30_000;
@@ -95,6 +96,7 @@ interface Binding {
 	writer: PiEventWriter | undefined;
 	permission: PendingPermission | undefined;
 	pendingTools: Map<string, PendingPiTool>;
+	bridgeToolCallIds: Set<string>;
 	/** Latest `usage_update.used` and the inference count of the running ACP prompt. */
 	contextUsed: number | undefined;
 	inferences: number;
@@ -144,6 +146,7 @@ export interface AntigravityRuntimeOptions {
 	maxBindings?: number;
 	idleMs?: number;
 	toolActivityMode?: ToolActivityMode;
+	isolatedHomeRoot?: string;
 }
 
 export interface RuntimeSnapshot {
@@ -194,6 +197,7 @@ export class AntigravityRuntime {
 	private readonly sessionStore: AcpSessionStore | undefined;
 	private readonly maxBindings: number;
 	private readonly idleMs: number;
+	private readonly isolatedHomeRoot: string | undefined;
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
 	private toolActivityMode: ToolActivityMode;
@@ -210,6 +214,7 @@ export class AntigravityRuntime {
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
 		this.toolActivityMode = options?.toolActivityMode ?? "compact";
+		this.isolatedHomeRoot = options?.isolatedHomeRoot;
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
@@ -252,15 +257,18 @@ export class AntigravityRuntime {
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
 		if (signal?.aborted) throw abortError();
 		this.assertEpoch(epoch);
-		const cwd = process.cwd();
-		const releaseSkillGuard = this.retainGeneratedSkillsGuard(cwd);
-		const connection = this.createConnection({ cwd });
+		const isolated = prepareIsolatedAcpEnvironment({
+			realCwd: process.cwd(),
+			...(this.isolatedHomeRoot ? { isolatedRoot: this.isolatedHomeRoot } : {}),
+		});
+		const releaseSkillGuard = this.retainGeneratedSkillsGuard(isolated.workspaceDir);
+		const connection = this.createConnection({ cwd: isolated.workspaceDir, env: isolated.env });
 		try {
 			const initialize = await connection.initialize(signal);
 			this.assertEpoch(epoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertEpoch(epoch);
-			const session = await connection.newSession(cwd, signal);
+			const session = await connection.newSession(isolated.workspaceDir, signal);
 			this.assertEpoch(epoch);
 			return sessionModels(session)?.availableModels ?? [];
 		} finally {
@@ -305,10 +313,14 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		let sessionId: string | undefined;
 		let text = "";
-		const cwd = process.cwd();
-		const releaseSkillGuard = this.retainGeneratedSkillsGuard(cwd);
+		const isolated = prepareIsolatedAcpEnvironment({
+			realCwd: process.cwd(),
+			...(this.isolatedHomeRoot ? { isolatedRoot: this.isolatedHomeRoot } : {}),
+		});
+		const releaseSkillGuard = this.retainGeneratedSkillsGuard(isolated.workspaceDir);
 		const connection = this.createConnection({
-			cwd,
+			cwd: isolated.workspaceDir,
+			env: isolated.env,
 			promptIdleTimeoutMs: QUOTA_TIMEOUT_MS,
 			handlers: {
 				onUpdate: ({ sessionId: id, update }) => {
@@ -322,7 +334,7 @@ export class AntigravityRuntime {
 			this.assertEpoch(epoch);
 			await authenticateForCredential(connection, initialize, apiKey);
 			this.assertEpoch(epoch);
-			sessionId = (await connection.newSession(cwd)).sessionId;
+			sessionId = (await connection.newSession(isolated.workspaceDir)).sessionId;
 			this.assertEpoch(epoch);
 			// agy answers a bare "/usage" text block itself: no model turn, no quota spent.
 			await connection.prompt({ sessionId, prompt: [{ type: "text", text: "/usage" }] });
@@ -331,7 +343,7 @@ export class AntigravityRuntime {
 			await connection.close();
 			releaseSkillGuard();
 			// agy keeps no index and offers no delete RPC; remove the files only once the process is gone (close() can give up on a process that ignored SIGKILL).
-			if (sessionId && !connection.process.alive) removeConversation(sessionId);
+			if (sessionId && !connection.process.alive) removeConversation(sessionId, isolated.acpDir);
 		}
 	}
 
@@ -581,7 +593,18 @@ export class AntigravityRuntime {
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const tools = context.tools ?? [];
 			const acpModelId = resolveAcpModelId(model, options.reasoning);
-			let binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+			const systemInstructions = currentSystemInstructions(context);
+			const nextInstructionsFingerprint = instructionFingerprintFromText(systemInstructions);
+			let binding = await this.getBinding(
+				key,
+				model,
+				acpModelId,
+				options.apiKey,
+				writer,
+				tools,
+				systemInstructions,
+				options.signal,
+			);
 			await this.modeChanges;
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			// Check before continuation early returns as well as before fresh prompts.
@@ -589,48 +612,16 @@ export class AntigravityRuntime {
 				binding.toolFingerprint !== piToolFingerprint(tools)) {
 				await this.invalidateBinding(binding);
 				this.assertSessionEpoch(key, epoch, sessionEpoch);
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-			}
-
-			// A permission tool result resumes the still-running ACP prompt rather than
-			// starting a second Antigravity turn.
-			if (binding.permission && !binding.turnCompletion) {
-				cancelPermission(binding);
-			}
-			if (binding.permission) {
-				const pending = binding.permission;
-				const result = findPermissionResult(context, pending.id);
-				if (!result) {
-					cancelPermission(binding);
-					await this.dropBinding(key, binding);
-					this.assertSessionEpoch(key, epoch, sessionEpoch);
-					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-				} else {
-					binding.writer = writer;
-					this.touchBinding(binding);
-					this.noteContinuationInstructions(binding, context);
-					binding.pendingContextCount = context.messages.length;
-					binding.pendingContextFingerprint = messagesFingerprint(context.messages);
-					binding.permission = undefined;
-					clearTimeout(pending.timer);
-					if (
-						!result.cancelled &&
-						result.optionId &&
-						pending.request.options.some((option) => option.optionId === result.optionId)
-					) {
-						pending.resolve({ outcome: { outcome: "selected", optionId: result.optionId } });
-					} else {
-						pending.resolve({ outcome: { outcome: "cancelled" } });
-					}
-					await this.awaitContinuation(binding, options.signal);
-					if (!writer.finished) {
-						writer.fail(
-							new AntigravityAcpError("protocol", "Antigravity ACP permission continuation ended without completing the response"),
-							options.signal?.aborted === true,
-						);
-					}
-					return;
-				}
+				binding = await this.getBinding(
+					key,
+					model,
+					acpModelId,
+					options.apiKey,
+					writer,
+					tools,
+					systemInstructions,
+					options.signal,
+				);
 			}
 
 			if (binding.pendingTools.size > 0 && !binding.turnCompletion) {
@@ -645,7 +636,16 @@ export class AntigravityRuntime {
 					cancelPiTools(binding, "Pi continued without returning every requested tool result");
 					await this.dropBinding(key, binding);
 					this.assertSessionEpoch(key, epoch, sessionEpoch);
-					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+					binding = await this.getBinding(
+						key,
+						model,
+						acpModelId,
+						options.apiKey,
+						writer,
+						tools,
+						systemInstructions,
+						options.signal,
+					);
 				} else {
 					binding.writer = writer;
 					this.touchBinding(binding);
@@ -679,18 +679,38 @@ export class AntigravityRuntime {
 				await this.modeChanges;
 				this.assertSessionEpoch(key, epoch, sessionEpoch);
 				// A queued caller may hold an obsolete binding after shutdown/mode changes.
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				binding = await this.getBinding(
+					key,
+					model,
+					acpModelId,
+					options.apiKey,
+					writer,
+					tools,
+					systemInstructions,
+					options.signal,
+				);
 				if (
 					binding.needsReconstruction || binding.mode !== this.permissionMode ||
 					this.confirmedMode(binding) !== this.permissionMode ||
 					binding.toolFingerprint !== piToolFingerprint(tools) ||
+					(binding.instructionsFingerprint !== undefined &&
+						binding.instructionsFingerprint !== nextInstructionsFingerprint) ||
 					context.messages.length < binding.messageCount ||
 					messagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
 						binding.historyFingerprint
 				) {
 					await this.dropBinding(key, binding, true);
 					this.assertSessionEpoch(key, epoch, sessionEpoch);
-					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+					binding = await this.getBinding(
+						key,
+						model,
+						acpModelId,
+						options.apiKey,
+						writer,
+						tools,
+						systemInstructions,
+						options.signal,
+					);
 				}
 				binding.writer = writer;
 				if (binding.modelId !== acpModelId) {
@@ -716,7 +736,7 @@ export class AntigravityRuntime {
 					unseenStart += 1;
 				}
 				const parts = adaptPromptToCapabilities(
-					buildPromptParts(context, fresh, unseenStart),
+					buildPromptParts(context, fresh, unseenStart, { includeSystemInstructions: false }),
 					binding.initialize,
 				);
 				await this.modeChanges;
@@ -725,7 +745,7 @@ export class AntigravityRuntime {
 					await this.invalidateBinding(binding);
 					throw new AntigravityAcpError("protocol", "Permission mode changed before prompting; retry the turn");
 				}
-				binding.instructionsFingerprint = instructionFingerprint(context);
+				binding.instructionsFingerprint = nextInstructionsFingerprint;
 				binding.needsReconstruction = false;
 				binding.pendingContextCount = context.messages.length;
 				binding.pendingContextFingerprint = messagesFingerprint(context.messages);
@@ -860,6 +880,7 @@ export class AntigravityRuntime {
 		apiKey: string | undefined,
 		writer: PiEventWriter,
 		tools: Context["tools"],
+		systemInstructions: string,
 		signal?: AbortSignal,
 	): Promise<Binding> {
 		this.assertActive();
@@ -873,7 +894,7 @@ export class AntigravityRuntime {
 		created = (async () => {
 			await this.evictForCapacity();
 			this.assertActive();
-			return this.createBinding(key, model, acpModelId, apiKey, writer, tools ?? [], created, signal);
+			return this.createBinding(key, model, acpModelId, apiKey, writer, tools ?? [], systemInstructions, created, signal);
 		})().catch((error) => {
 			if (this.bindings.get(key) === created) this.bindings.delete(key);
 			throw error;
@@ -889,17 +910,23 @@ export class AntigravityRuntime {
 		apiKey: string | undefined,
 		writer: PiEventWriter,
 		tools: NonNullable<Context["tools"]>,
+		systemInstructions: string,
 		entryPromise: Promise<Binding>,
 		signal?: AbortSignal,
 	): Promise<Binding> {
-		const cwd = process.cwd();
-		const releaseSkillGuard = this.retainGeneratedSkillsGuard(cwd);
+		const realCwd = process.cwd();
+		const isolated = prepareIsolatedAcpEnvironment({
+			realCwd,
+			...(this.isolatedHomeRoot ? { isolatedRoot: this.isolatedHomeRoot } : {}),
+		});
+		const releaseSkillGuard = this.retainGeneratedSkillsGuard(isolated.workspaceDir);
 		let binding: Binding | undefined;
 		let bridge: PiMcpBridge | undefined;
 		const epoch = this.bindingEpoch;
 		const sessionEpoch = this.sessionEpoch(key);
 		const connection = this.createConnection({
-			cwd,
+			cwd: isolated.workspaceDir,
+			env: isolated.env,
 			handlers: {
 				onUpdate: (notification) => this.consumeUpdate(binding, notification),
 				onPermission: (request) => this.requestPermission(binding, request),
@@ -922,14 +949,25 @@ export class AntigravityRuntime {
 				mcpServer = await bridge.start();
 			}
 			const mcpServers = mcpServer ? [mcpServer] : [];
+			const metaOptions = {
+				...(systemInstructions ? { systemInstructions } : {}),
+				mcpMaxOutputBytes: DEFAULT_MCP_MAX_OUTPUT_BYTES,
+				eagerMcpServers: ["pi-bridge"],
+			};
 			const piSessionId = key.startsWith("sid:") ? key.slice(4) : undefined;
 			const saved = piSessionId ? this.sessionStore?.get(piSessionId) : undefined;
 			let session: AcpNewSessionResponse | undefined;
 			let restored = false;
-			if (saved?.cwd === cwd) {
+			if (saved?.cwd === realCwd) {
 				if (initialize.agentCapabilities?.sessionCapabilities?.resume) {
 					try {
-						const resumed = await connection.resumeSession(saved.acpSessionId, cwd, mcpServers, signal);
+						const resumed = await connection.resumeSession(
+							saved.acpSessionId,
+							isolated.workspaceDir,
+							mcpServers,
+							signal,
+							metaOptions,
+						);
 						session = { sessionId: saved.acpSessionId, ...resumed };
 						restored = true;
 					} catch {
@@ -938,7 +976,13 @@ export class AntigravityRuntime {
 				}
 				if (!session && initialize.agentCapabilities?.loadSession === true) {
 					try {
-						const loaded = await connection.loadSession(saved.acpSessionId, cwd, mcpServers, signal);
+						const loaded = await connection.loadSession(
+							saved.acpSessionId,
+							isolated.workspaceDir,
+							mcpServers,
+							signal,
+							metaOptions,
+						);
 						session = { sessionId: saved.acpSessionId, ...loaded };
 						restored = true;
 					} catch {
@@ -946,7 +990,7 @@ export class AntigravityRuntime {
 					}
 				}
 			}
-			session ??= await connection.newSession(cwd, signal, mcpServers);
+			session ??= await connection.newSession(isolated.workspaceDir, signal, mcpServers, metaOptions);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const mode = this.permissionMode;
 			if (!supportsMode(session, mode)) {
@@ -963,12 +1007,12 @@ export class AntigravityRuntime {
 			if (mode !== this.permissionMode) throw new AntigravityAcpError("protocol", "Permission mode changed during session setup; retry the turn");
 			const createdBinding: Binding = {
 				key,
-				cwd,
+				cwd: realCwd,
 				connection,
 				initialize,
 				session,
 				mode,
-				instructionsFingerprint: undefined,
+				instructionsFingerprint: instructionFingerprintFromText(systemInstructions),
 				needsReconstruction: false,
 				modelId: acpModelId,
 				messageCount: restored && saved ? saved.messageCount : 0,
@@ -979,6 +1023,7 @@ export class AntigravityRuntime {
 				writer,
 				permission: undefined,
 				pendingTools: new Map(),
+				bridgeToolCallIds: new Set(),
 				contextUsed: undefined,
 				inferences: 0,
 				toolBatchTimer: undefined,
@@ -1070,24 +1115,14 @@ export class AntigravityRuntime {
 		if (!binding?.writer || binding.writer.finished || binding.permission || binding.abortRequested || request.sessionId !== binding.session.sessionId) {
 			return Promise.resolve({ outcome: { outcome: "cancelled" } });
 		}
-		const id = crypto.randomUUID();
-		return new Promise<RequestPermissionResponse>((resolve) => {
-			const timer = setTimeout(() => {
-				if (binding.permission?.id !== id) return;
-				binding.permission = undefined;
-				resolve({ outcome: { outcome: "cancelled" } });
-			}, PERMISSION_TIMEOUT_MS);
-			timer.unref();
-			binding.permission = { id, request, resolve, timer };
-			try {
-				binding.writer?.toolCall(id, PERMISSION_TOOL_NAME, { requestId: id });
-				binding.writer?.done("toolUse");
-			} catch {
-				clearTimeout(timer);
-				if (binding.permission?.id === id) binding.permission = undefined;
-				resolve({ outcome: { outcome: "cancelled" } });
-			}
-		});
+		if (!isPiBridgePermissionRequest(request)) {
+			return Promise.resolve({ outcome: { outcome: "cancelled" } });
+		}
+		const allowOption = selectAllowOption(request.options);
+		if (!allowOption) {
+			return Promise.resolve({ outcome: { outcome: "cancelled" } });
+		}
+		return Promise.resolve({ outcome: { outcome: "selected", optionId: allowOption.optionId } });
 	}
 
 	private consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {
@@ -1097,6 +1132,17 @@ export class AntigravityRuntime {
 			binding.writer?.fail(new AntigravityAcpError("protocol", "Antigravity changed the permission mode unexpectedly; session closed"), false);
 			void this.invalidateBinding(binding).catch(() => undefined);
 			return;
+		}
+		const update = notification.update;
+		if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+			if (isPiBridgeToolUpdate(update) || binding.bridgeToolCallIds?.has(update.toolCallId)) {
+				if (update.status === "completed" || update.status === "failed") {
+					binding.bridgeToolCallIds?.delete(update.toolCallId);
+				} else {
+					binding.bridgeToolCallIds?.add(update.toolCallId);
+				}
+				return;
+			}
 		}
 		if (!binding.writer) return;
 		for (const activity of mapSessionUpdate(notification)) {
@@ -1454,7 +1500,33 @@ function cancelPermission(binding: Binding): void {
 }
 
 function instructionFingerprint(context: Context): string {
-	return createHash("sha256").update(currentSystemInstructions(context)).digest("hex");
+	return instructionFingerprintFromText(currentSystemInstructions(context));
+}
+
+function instructionFingerprintFromText(instructions: string): string {
+	return createHash("sha256").update(instructions).digest("hex");
+}
+
+function isPiBridgePermissionRequest(request: RequestPermissionRequest): boolean {
+	const meta = request.toolCall._meta as { mcp?: { server?: unknown } } | null | undefined;
+	return meta?.mcp?.server === "pi-bridge";
+}
+
+function selectAllowOption(
+	options: RequestPermissionRequest["options"],
+): RequestPermissionRequest["options"][number] | undefined {
+	return (
+		options.find((option) => option.kind === "allow_once") ??
+		options.find((option) => option.kind === "allow_always")
+	);
+}
+
+function isPiBridgeToolUpdate(
+	update: Extract<SessionNotification["update"], { sessionUpdate: "tool_call" | "tool_call_update" }>,
+): boolean {
+	const meta = update._meta as { mcp?: { server?: unknown } } | null | undefined;
+	if (meta?.mcp?.server === "pi-bridge") return true;
+	return typeof update.title === "string" && update.title.startsWith("pi-bridge_");
 }
 
 function abortTurn(binding: Binding): void {

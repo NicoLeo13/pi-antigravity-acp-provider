@@ -23,23 +23,30 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
+import { prepareIsolatedAcpEnvironment } from "../src/acp/isolated-env.js";
+
 function setup(
 	scenario?: string,
 	mode: PermissionMode = "yolo",
 	store?: AcpSessionStore,
-	runtimeOptions?: { maxBindings?: number; idleMs?: number },
+	runtimeOptions?: { maxBindings?: number; idleMs?: number; isolatedHomeRoot?: string },
 ) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-safety-")); roots.push(root);
+	const isolatedHomeRoot = runtimeOptions?.isolatedHomeRoot ?? path.join(root, "host-acp");
 	const log = path.join(root, "calls.jsonl"); fs.writeFileSync(log, "");
 	const connections: AntigravityAcpConnection[] = [];
 	const runtime = new AntigravityRuntime((options) => {
-		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
+		const connection = new AntigravityAcpConnection({
+			...options,
+			command: process.execPath,
+			args: [fakeAgent, ...(scenario ? [scenario] : [])],
+			env: { ...process.env, ...options.env, FAKE_AGENT_LOG_FILE: log },
+		});
 		connections.push(connection); return connection;
-	}, mode, store, runtimeOptions);
+	}, mode, store, { ...runtimeOptions, isolatedHomeRoot });
 	runtimes.push(runtime);
-	const entries = () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { method: string; prompt?: unknown; mode?: string });
-	return { root, runtime, connections, entries };
+	const entries = () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { method: string; cwd?: string; _meta?: unknown; prompt?: unknown; mode?: string });
+	return { root, isolatedHomeRoot, runtime, connections, entries };
 }
 async function drain(writer: PiEventWriter) { for await (const _event of writer.stream) void _event; return writer.message; }
 function turn(runtime: AntigravityRuntime, messages: Context["messages"], sessionId = "safety") {
@@ -273,7 +280,7 @@ describe("instruction updates during continuations", () => {
 	it.each([false, true])("rebuilds with changed instructions instead of pretending they reached ACP (restart=%s)", async (restart) => {
 		const fixture = setup();
 		const store = new AcpSessionStore(path.join(fixture.root, "sessions.json"));
-		const firstRuntime = setup(undefined, "yolo", store);
+		const firstRuntime = setup(undefined, "yolo", store, { isolatedHomeRoot: fixture.isolatedHomeRoot });
 		const firstContext = normalizeContext({ systemPrompt: "ORIGINAL_RULE", tools, messages: [user("use bridge")] });
 		const first = await drain(firstRuntime.runtime.stream(model, firstContext, { sessionId: "rules", apiKey: "test-key" }));
 		const call = first.content.find((block) => block.type === "toolCall");
@@ -284,30 +291,30 @@ describe("instruction updates during continuations", () => {
 		] });
 		const second = await drain(firstRuntime.runtime.stream(model, context, { sessionId: "rules", apiKey: "test-key" }));
 		expect(second.stopReason).toBe("stop"); expect(store.get("rules")).toBeUndefined();
-		const next = restart ? setup(undefined, "yolo", store) : firstRuntime;
+		const next = restart ? setup(undefined, "yolo", store, { isolatedHomeRoot: fixture.isolatedHomeRoot }) : firstRuntime;
 		if (restart) await firstRuntime.runtime.close();
 		const third = await drain(next.runtime.stream(model, normalizeContext({ messages: [...context.messages, second, user("next", 4)] }), { sessionId: "rules", apiKey: "test-key" }));
 		expect(third.stopReason).toBe("stop");
-		const prompts = next.entries().filter((entry) => entry.method === "session/prompt");
-		expect(JSON.stringify(prompts.at(-1)?.prompt)).toContain("UPDATED_RULE");
+		const sessions = next.entries().filter((entry) => entry.method === "session/new");
+		expect(JSON.stringify(sessions.at(-1)?._meta)).toContain("UPDATED_RULE");
 		if (!restart) expect(firstRuntime.connections).toHaveLength(2);
 	});
 
-	it("preserves instructions arriving during a permission continuation", async () => {
+	it("preserves instructions arriving during a bridged tool continuation when rebuilding synchronously", async () => {
 		const { runtime, entries } = setup();
-		const context = normalizeContext({ systemPrompt: "ORIGINAL", messages: [user("permission")] });
-		const first = await drain(runtime.stream(model, context, { sessionId: "permission-rules", apiKey: "test-key" }));
+		const firstContext = normalizeContext({ systemPrompt: "ORIGINAL", tools, messages: [user("use bridge")] });
+		const first = await drain(runtime.stream(model, firstContext, { sessionId: "tool-rules", apiKey: "test-key" }));
 		const call = first.content.find((block) => block.type === "toolCall");
-		if (call?.type !== "toolCall") throw new Error("missing broker");
-		const resumed = normalizeContext({ messages: [...context.messages, first,
-			{ role: "toolResult", toolCallId: call.id, toolName: PERMISSION_TOOL_NAME,
-				content: [{ type: "text", text: "Rejected" }], details: { kind: PERMISSION_RESULT_KIND, requestId: call.id, optionId: "reject-once", cancelled: false }, isError: false, timestamp: 2 },
+		if (call?.type !== "toolCall") throw new Error("missing call");
+		const resumed = normalizeContext({ messages: [...firstContext.messages, first,
+			{ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: "completed" }], isError: false, timestamp: 2 },
 			{ role: "system", content: "NEW_RULE", timestamp: 3 },
 		] });
-		const second = await drain(runtime.stream(model, resumed, { sessionId: "permission-rules", apiKey: "test-key" }));
+		const second = await drain(runtime.stream(model, resumed, { sessionId: "tool-rules", apiKey: "test-key" }));
 		expect(second.stopReason).toBe("stop");
-		await drain(runtime.stream(model, normalizeContext({ messages: [...resumed.messages, second, user("next", 4)] }), { sessionId: "permission-rules", apiKey: "test-key" }));
-		expect(JSON.stringify(entries().filter((entry) => entry.method === "session/prompt").at(-1)?.prompt)).toContain("NEW_RULE");
+		await drain(runtime.stream(model, normalizeContext({ messages: [...resumed.messages, second, user("next", 4)] }), { sessionId: "tool-rules", apiKey: "test-key" }));
+		const sessions = entries().filter((entry) => entry.method === "session/new");
+		expect(JSON.stringify(sessions.at(-1)?._meta)).toContain("NEW_RULE");
 	});
 
 	it("reports oversized instructions as a stream error before spawning", async () => {
@@ -319,10 +326,10 @@ describe("instruction updates during continuations", () => {
 });
 
 describe("abort cleanup", () => {
-	it.each(["use bridge", "permission"])("answers parked requests on abort and keeps a healthy process: %s", async (text) => {
+	it("answers parked requests on abort and keeps a healthy process", async () => {
 		const { runtime } = setup();
 		const controller = new AbortController();
-		const first = await drain(runtime.stream(model, { tools, messages: [user(text)] }, { sessionId: "abort", apiKey: "test-key", signal: controller.signal }));
+		const first = await drain(runtime.stream(model, { tools, messages: [user("use bridge")] }, { sessionId: "abort", apiKey: "test-key", signal: controller.signal }));
 		expect(first.stopReason).toBe("toolUse");
 		controller.abort();
 		await vi.waitFor(async () => {
@@ -374,23 +381,47 @@ describe("abort cleanup", () => {
 		expect(release).toHaveBeenCalledTimes(1);
 	});
 
-	it("cancels late or partially exposed permissions without leaving a timer", async () => {
+	it("auto-approves pi-bridge permissions and cancels non-bridge or stale permissions without timers", async () => {
 		vi.useFakeTimers();
 		try {
 			const { runtime } = setup();
 			const internals = runtime as unknown as { requestPermission(binding: unknown, request: unknown): Promise<unknown> };
 			const binding = { session: { sessionId: "unit" }, abortRequested: false, permission: undefined,
-				writer: { finished: true, toolCall: vi.fn(() => { throw new Error("cannot expose"); }), done: vi.fn() } };
-			const request = { sessionId: "unit", options: [], toolCall: { toolCallId: "native" } };
+				writer: { finished: false, toolCall: vi.fn(), done: vi.fn() } };
+			const options = [
+				{ optionId: "allow-once", name: "Allow", kind: "allow_once" },
+				{ optionId: "reject-once", name: "Reject", kind: "reject_once" },
+			];
 			const cancelled = { outcome: { outcome: "cancelled" } };
-			expect(await internals.requestPermission(binding, request)).toEqual(cancelled);
-			expect(binding.writer.toolCall).not.toHaveBeenCalled();
-			binding.writer.finished = false;
-			expect(await internals.requestPermission(binding, request)).toEqual(cancelled);
-			expect(binding.permission).toBeUndefined(); expect(vi.getTimerCount()).toBe(0);
+
+			expect(await internals.requestPermission(binding, {
+				sessionId: "unit",
+				options,
+				toolCall: { toolCallId: "mcp-1", _meta: { mcp: { server: "pi-bridge", tool: "pi_echo" } } },
+			})).toEqual({ outcome: { outcome: "selected", optionId: "allow-once" } });
+
+			expect(await internals.requestPermission(binding, {
+				sessionId: "unit",
+				options,
+				toolCall: { toolCallId: "native" },
+			})).toEqual(cancelled);
+
+			expect(await internals.requestPermission(binding, {
+				sessionId: "unit",
+				options,
+				toolCall: { toolCallId: "other-mcp", _meta: { mcp: { server: "other-server", tool: "tool" } } },
+			})).toEqual(cancelled);
+
 			binding.abortRequested = true;
-			expect(await internals.requestPermission(binding, request)).toEqual(cancelled);
-			expect(binding.writer.toolCall).toHaveBeenCalledTimes(1);
+			expect(await internals.requestPermission(binding, {
+				sessionId: "unit",
+				options,
+				toolCall: { toolCallId: "mcp-2", _meta: { mcp: { server: "pi-bridge", tool: "pi_echo" } } },
+			})).toEqual(cancelled);
+
+			expect(binding.writer.toolCall).not.toHaveBeenCalled();
+			expect(binding.permission).toBeUndefined();
+			expect(vi.getTimerCount()).toBe(0);
 		} finally { vi.useRealTimers(); }
 	});
 
@@ -537,16 +568,21 @@ describe("context handoff transport", () => {
 		] });
 		const response = await drain(runtime.stream({ ...model, input: ["text", "image"] }, context, { sessionId: "handoff", apiKey: "test-key" }));
 		expect(response.stopReason).toBe("stop");
+		const sessions = entries().filter((entry) => entry.method === "session/new");
+		const append = JSON.stringify(sessions.at(-1)?._meta);
+		expect(append).toContain("BASE_RULE");
+		expect(append).toContain("NEW_RULE");
+		expect(append).toContain("UPDATED_RULE");
+		expect(append).not.toContain("OLD_RULE");
 		const prompts = entries().filter((entry) => entry.method === "session/prompt");
 		expect(prompts).toHaveLength(1);
 		const prompt = prompts[0]!.prompt as Array<{ type: string; resource?: { text?: string }; text?: string }>;
 		expect(prompt).toContainEqual({ type: "text", text: "ACTIVE_REQUEST" });
 		expect(prompt).toContainEqual(image);
 		const reconstruction = prompt[0]!.resource!.text!;
-		expect(reconstruction).toContain("BASE_RULE");
-		expect(reconstruction).toContain("NEW_RULE");
-		expect(reconstruction).toContain("UPDATED_RULE");
-		expect(reconstruction).not.toContain("OLD_RULE");
+		expect(reconstruction).not.toContain("BASE_RULE");
+		expect(reconstruction).not.toContain("NEW_RULE");
+		expect(reconstruction).not.toContain("UPDATED_RULE");
 		expect(reconstruction).toContain("[tool call read id=external-call]");
 		expect(reconstruction).toContain("## Tool result (read id=external-call)");
 		expect(reconstruction).toContain("RESULT_TAIL");
@@ -721,25 +757,31 @@ describe("live quota", () => {
 
 describe("throwaway conversations", () => {
 	const userSid = "0f8fad5b-d9cb-469f-a165-70867728950e";
-	function conversationsIn(root: string, sids: "uuid" | "plain" = "uuid") {
-		const acp = path.join(root, "gemini", "antigravity-acp");
-		const conversations = path.join(acp, "conversations");
-		fs.mkdirSync(conversations, { recursive: true });
-		for (const suffix of [".db", ".db-shm", ".db-wal", ".meta"]) fs.writeFileSync(path.join(conversations, userSid + suffix), "user");
-		fs.writeFileSync(path.join(acp, "acp_token.json"), "{}");
+	function conversationsIn(root: string, isolatedHomeRoot: string, sids: "uuid" | "plain" = "uuid") {
+		const sourceAcp = path.join(root, "gemini", "antigravity-acp");
+		fs.mkdirSync(sourceAcp, { recursive: true });
+		fs.writeFileSync(path.join(sourceAcp, "acp_token.json"), "{}");
 		vi.stubEnv("GEMINI_HOME", path.join(root, "gemini"));
 		vi.stubEnv("FAKE_AGENT_CONVERSATIONS", sids);
+		const isolated = prepareIsolatedAcpEnvironment({
+			realCwd: process.cwd(),
+			sourceEnv: process.env,
+			isolatedRoot: isolatedHomeRoot,
+		});
+		const conversations = path.join(isolated.acpDir, "conversations");
+		fs.mkdirSync(conversations, { recursive: true });
+		for (const suffix of [".db", ".db-shm", ".db-wal", ".meta"]) fs.writeFileSync(path.join(conversations, userSid + suffix), "user");
 		return {
 			files: () => fs.readdirSync(conversations).sort(),
-			token: () => fs.existsSync(path.join(acp, "acp_token.json")),
+			token: () => fs.existsSync(path.join(isolated.acpDir, "acp_token.json")),
 		};
 	}
 	const userFiles = [".db", ".db-shm", ".db-wal", ".meta"].map((suffix) => userSid + suffix).sort();
 	afterEach(() => { vi.unstubAllEnvs(); });
 
 	it("removes the conversation a quota read creates and nothing else", async () => {
-		const { root, runtime, connections } = setup();
-		const store = conversationsIn(root);
+		const { root, isolatedHomeRoot, runtime, connections } = setup();
+		const store = conversationsIn(root, isolatedHomeRoot);
 		expect((await runtime.quota(undefined)).groups).toHaveLength(3);
 		await connections[0]!.process.exited;
 		expect(store.files()).toEqual(userFiles);
@@ -747,8 +789,8 @@ describe("throwaway conversations", () => {
 	});
 
 	it("keeps the conversation of a user turn", async () => {
-		const { root, runtime, connections } = setup();
-		const store = conversationsIn(root);
+		const { root, isolatedHomeRoot, runtime, connections } = setup();
+		const store = conversationsIn(root, isolatedHomeRoot);
 		expect((await turn(runtime, [user("hello")])).stopReason).toBe("stop");
 		const afterTurn = store.files();
 		expect(afterTurn).toHaveLength(8);
@@ -758,8 +800,8 @@ describe("throwaway conversations", () => {
 	});
 
 	it("deletes nothing for a session id that is not a UUID", async () => {
-		const { root, runtime, connections } = setup();
-		const store = conversationsIn(root, "plain");
+		const { root, isolatedHomeRoot, runtime, connections } = setup();
+		const store = conversationsIn(root, isolatedHomeRoot, "plain");
 		await runtime.quota(undefined);
 		await connections[0]!.process.exited;
 		expect(store.files()).toEqual([...userFiles, "fake-session.db", "fake-session.db-shm", "fake-session.db-wal", "fake-session.meta"].sort());
@@ -811,30 +853,63 @@ describe("bridged update cleanliness and generated skill cleanup", () => {
 		expect(fullThinking).toContain("[Antigravity tool update: tc-1 — completed]");
 	});
 
-	it("removes newly created skills/system/run-workflow/SKILL.md on close while preserving pre-existing files", async () => {
+	it("suppresses pi-bridge tool call echoes from thinking even in full toolActivityMode", async () => {
+		const { runtime } = setup();
+		runtime.setToolActivityMode("full");
+		const result = await drain(
+			runtime.stream(model, { tools, messages: [user("emit pi-bridge tool activity")] }, { sessionId: "bridge-suppress", apiKey: "test-key" }),
+		);
+		const thinking = result.content
+			.filter((block) => block.type === "thinking")
+			.map((block) => block.thinking)
+			.join("\n");
+		expect(thinking).toContain("Reasoning");
+		expect(thinking).not.toContain("[Antigravity tool:");
+		expect(thinking).not.toContain("[Antigravity tool update:");
+		expect(thinking).not.toContain("pi-bridge_pi_echo");
+		expect(result.content.find((block) => block.type === "text")).toEqual({ type: "text", text: "Done" });
+	});
+
+	it("runs ACP in an isolated workspace and GEMINI_HOME while anchoring sessionStore to realCwd", async () => {
+		const realProject = fs.mkdtempSync(path.join(os.tmpdir(), "acp-real-project-"));
+		roots.push(realProject);
+		vi.spyOn(process, "cwd").mockReturnValue(realProject);
+
+		const fixture = setup();
+		const store = new AcpSessionStore(path.join(fixture.root, "sessions.json"));
+		const isolatedRuntime = setup(undefined, "yolo", store, { isolatedHomeRoot: fixture.isolatedHomeRoot });
+		const first = await turn(isolatedRuntime.runtime, [user("hello")], "isolated-session");
+		expect(first.stopReason).toBe("stop");
+
+		const newSession = isolatedRuntime.entries().find((entry) => entry.method === "session/new");
+		const isolated = prepareIsolatedAcpEnvironment({
+			realCwd: realProject,
+			sourceEnv: process.env,
+			isolatedRoot: fixture.isolatedHomeRoot,
+		});
+		expect(newSession?.cwd).toBe(isolated.workspaceDir);
+		expect(newSession?.cwd).not.toBe(realProject);
+		expect(store.get("isolated-session")?.cwd).toBe(realProject);
+		expect(fs.readdirSync(realProject)).toEqual([]);
+	});
+
+	it("isolates generated run-workflow skills away from realCwd and cleans up the isolated workspace on close", async () => {
 		const cleanCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acp-skill-clean-"));
 		roots.push(cleanCwd);
 		vi.spyOn(process, "cwd").mockReturnValue(cleanCwd);
 		vi.stubEnv("FAKE_AGENT_WRITE_RUN_WORKFLOW", "1");
 
-		const { runtime } = setup();
+		const { runtime, isolatedHomeRoot } = setup();
+		const isolated = prepareIsolatedAcpEnvironment({
+			realCwd: cleanCwd,
+			sourceEnv: process.env,
+			isolatedRoot: isolatedHomeRoot,
+		});
 		const first = await turn(runtime, [user("hello")], "skill-clean");
 		expect(first.stopReason).toBe("stop");
-		expect(fs.existsSync(path.join(cleanCwd, "skills", "system", "run-workflow", "SKILL.md"))).toBe(true);
-		await runtime.closeSession("skill-clean");
 		expect(fs.existsSync(path.join(cleanCwd, "skills"))).toBe(false);
-
-		const existingCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acp-skill-existing-"));
-		roots.push(existingCwd);
-		const existingFile = path.join(existingCwd, "skills", "system", "run-workflow", "SKILL.md");
-		fs.mkdirSync(path.dirname(existingFile), { recursive: true });
-		fs.writeFileSync(existingFile, "# user-owned\n");
-		vi.spyOn(process, "cwd").mockReturnValue(existingCwd);
-
-		const existingSetup = setup();
-		const second = await turn(existingSetup.runtime, [user("hello")], "skill-preserve");
-		expect(second.stopReason).toBe("stop");
-		await existingSetup.runtime.close();
-		expect(fs.readFileSync(existingFile, "utf8")).toBe("# user-owned\n");
+		expect(fs.existsSync(path.join(isolated.workspaceDir, "skills", "system", "run-workflow", "SKILL.md"))).toBe(true);
+		await runtime.closeSession("skill-clean");
+		expect(fs.existsSync(path.join(isolated.workspaceDir, "skills"))).toBe(false);
 	});
 });

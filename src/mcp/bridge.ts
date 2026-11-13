@@ -114,6 +114,11 @@ export class PiMcpBridge {
 			name: "pi-bridge",
 			url: this.url,
 			headers: [{ name: "Authorization", value: `Bearer ${this.token}` }],
+			_meta: {
+				antigravity: {
+					forceAllToolsEager: true,
+				},
+			},
 		};
 	}
 

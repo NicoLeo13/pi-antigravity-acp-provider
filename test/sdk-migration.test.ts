@@ -41,8 +41,9 @@ describe("SDK 2 app migration over ACP v1", () => {
 		const initialize = entries().find((entry) => entry.method === "initialize");
 		expect(initialize.params).toMatchObject({
 			protocolVersion: 1,
-			clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+			clientCapabilities: {},
 		});
+		expect(initialize.params.clientCapabilities).toEqual({});
 		expect(ACP_PROTOCOL_VERSION).toBe(1);
 		const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 		expect(ACP_SDK_VERSION).toBe(pkg.dependencies["@agentclientprotocol/sdk"]);

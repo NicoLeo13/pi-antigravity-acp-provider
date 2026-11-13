@@ -1,9 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { findSessionSelector, sessionModels, sessionModes } from "../src/acp/session-state.js";
+import { DEFAULT_MCP_MAX_OUTPUT_BYTES } from "../src/constants.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
 
@@ -242,5 +245,48 @@ describe("AntigravityAcpConnection", () => {
 			await connection.close();
 		}
 		expect(connection.process.alive).toBe(false);
+	});
+
+	it("sends _meta.antigravity on session/new, session/load, and session/resume", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-connection-meta-"));
+		const log = path.join(root, "calls.jsonl");
+		fs.writeFileSync(log, "");
+		const connection = new AntigravityAcpConnection({
+			cwd: root,
+			command: process.execPath,
+			args: [fakeAgent],
+			env: { ...process.env, FAKE_AGENT_LOG_FILE: log },
+		});
+		try {
+			const mcpServers = [
+				{
+					type: "http" as const,
+					name: "pi-bridge",
+					url: "http://127.0.0.1:1234/mcp",
+					headers: [],
+					_meta: { antigravity: { forceAllToolsEager: true } },
+				},
+			];
+			const metaOptions = { systemInstructions: "SYS_APPEND" };
+			const session = await connection.newSession(root, undefined, mcpServers, metaOptions);
+			await connection.loadSession(session.sessionId, root, mcpServers, undefined, metaOptions);
+			await connection.resumeSession(session.sessionId, root, mcpServers, undefined, metaOptions);
+
+			const entries = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { method: string; _meta?: unknown });
+			for (const method of ["session/new", "session/load", "session/resume"]) {
+				const entry = entries.find((candidate) => candidate.method === method);
+				expect(entry?._meta).toEqual({
+					antigravity: {
+						enabledTools: [],
+						eagerMcpServers: ["pi-bridge"],
+						mcpMaxOutputBytes: DEFAULT_MCP_MAX_OUTPUT_BYTES,
+						systemPrompt: { append: "SYS_APPEND" },
+					},
+				});
+			}
+		} finally {
+			await connection.close();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

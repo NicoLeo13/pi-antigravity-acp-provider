@@ -11,3 +11,4 @@ export const BRIDGED_TOOL_RESULT_KIND = "pi-antigravity-acp-tool-v1";
 export const QUOTA_REQUEST_CHANNEL = "antigravity-acp:quota:request";
 export const DEFAULT_MAX_BINDINGS = 4;
 export const DEFAULT_BINDING_IDLE_MS = 5 * 60_000;
+export const DEFAULT_MCP_MAX_OUTPUT_BYTES = 256 * 1024;

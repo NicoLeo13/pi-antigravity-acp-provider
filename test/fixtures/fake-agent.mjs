@@ -43,7 +43,15 @@ for await (const line of rl) {
 	}
 	const { id, method, params } = message;
 	if (process.env.FAKE_AGENT_LOG_FILE && method) fs.appendFileSync(process.env.FAKE_AGENT_LOG_FILE,
-		JSON.stringify({ method, ...(method === "initialize" ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
+		JSON.stringify({
+			method,
+			...(method === "initialize" ? { params } : {}),
+			...((method === "session/new" || method === "session/load" || method === "session/resume")
+				? { cwd: params.cwd, mcpServers: params.mcpServers, _meta: params._meta }
+				: {}),
+			...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}),
+			...(method === "session/set_mode" ? { modeId: params.modeId } : {}),
+		}) + "\n");
 	if (id === "permission-1" && method === undefined) {
 		if (permissionPromptId === undefined) continue;
 		const decision = message.result?.outcome?.outcome ?? "cancelled";
@@ -244,6 +252,25 @@ for await (const line of rl) {
 		const notify = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update } });
 		// agy reports the context size after each inference; setup sends used: 0.
 		const usageUpdate = (used) => notify({ sessionUpdate: "usage_update", used, size: 1048576 });
+		if (text === "emit pi-bridge tool activity") {
+			notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reasoning" } });
+			notify({
+				sessionUpdate: "tool_call",
+				toolCallId: "tc-bridge-1",
+				title: "pi-bridge_pi_echo",
+				kind: "other",
+				status: "in_progress",
+				_meta: { mcp: { server: "pi-bridge", tool: "pi_echo" }, is_mcp_tool_call: true },
+			});
+			notify({
+				sessionUpdate: "tool_call_update",
+				toolCallId: "tc-bridge-1",
+				status: "completed",
+			});
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
 		if (text === "emit tool activity") {
 			notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reasoning" } });
 			notify({
@@ -266,7 +293,7 @@ for await (const line of rl) {
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
 			continue;
 		}
-		if (!continuing && text.includes("bridge") && mcpServer) {
+		if (!continuing && text.includes("bridge") && !text.includes("permission") && mcpServer) {
 			bridgePromptId = id;
 			const reportUsage = text.includes("usage");
 			if (reportUsage) { usageUpdate(0); usageUpdate(1000); }
@@ -342,6 +369,7 @@ for await (const line of rl) {
 			continue;
 		}
 		if (!continuing && text.includes("permission")) {
+			const isPiBridge = text.includes("pi-bridge permission");
 			permissionPromptId = id;
 			send({
 				jsonrpc: "2.0",
@@ -349,7 +377,14 @@ for await (const line of rl) {
 				method: "session/request_permission",
 				params: {
 					sessionId: params.sessionId,
-					toolCall: { toolCallId: "native-tool-1", title: "Run native command", kind: "execute" },
+					toolCall: isPiBridge
+						? {
+							toolCallId: "mcp-tool-1",
+							title: "pi-bridge_pi_echo",
+							kind: "other",
+							_meta: { mcp: { server: "pi-bridge", tool: "pi_echo" }, is_mcp_tool_call: true },
+						}
+						: { toolCallId: "native-tool-1", title: "Run native command", kind: "execute" },
 					options: [
 						{ optionId: "allow-once", name: "Allow once", kind: "allow_once" },
 						{ optionId: "reject-once", name: "Reject", kind: "reject_once" },
