@@ -306,6 +306,7 @@ export class AntigravityAcpConnection {
 				cancelTimer = setTimeout(() => {
 					void this.close().finally(() => finish(() => reject(abortError())));
 				}, 1_500);
+				cancelTimer.unref?.();
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
 			if (signal.aborted) onAbort();

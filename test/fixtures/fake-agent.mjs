@@ -141,6 +141,14 @@ for await (const line of rl) {
 			for (const suffix of [".db", ".db-shm", ".db-wal"]) fs.writeFileSync(path.join(conversations, sessionId + suffix), "");
 			fs.writeFileSync(path.join(conversations, `${sessionId}.meta`), JSON.stringify({ cwd: params.cwd }));
 		}
+		if (process.env.FAKE_AGENT_WRITE_RUN_WORKFLOW === "1" && params.cwd) {
+			const skillDir = path.join(params.cwd, "skills", "system", "run-workflow");
+			const skillFile = path.join(skillDir, "SKILL.md");
+			if (!fs.existsSync(skillFile)) {
+				fs.mkdirSync(skillDir, { recursive: true });
+				fs.writeFileSync(skillFile, "# generated run-workflow\n");
+			}
+		}
 		mcpServer = params.mcpServers?.find((server) => server.type === "http");
 		send({
 			jsonrpc: "2.0",
@@ -236,6 +244,28 @@ for await (const line of rl) {
 		const notify = (update) => send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update } });
 		// agy reports the context size after each inference; setup sends used: 0.
 		const usageUpdate = (used) => notify({ sessionUpdate: "usage_update", used, size: 1048576 });
+		if (text === "emit tool activity") {
+			notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reasoning" } });
+			notify({
+				sessionUpdate: "plan",
+				entries: [{ content: "Inspect file", priority: "high", status: "in_progress" }],
+			});
+			notify({
+				sessionUpdate: "tool_call",
+				toolCallId: "tc-1",
+				title: "pi_echo",
+				kind: "other",
+				status: "in_progress",
+			});
+			notify({
+				sessionUpdate: "tool_call_update",
+				toolCallId: "tc-1",
+				status: "completed",
+			});
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
 		if (!continuing && text.includes("bridge") && mcpServer) {
 			bridgePromptId = id;
 			const reportUsage = text.includes("usage");
@@ -249,7 +279,15 @@ for await (const line of rl) {
 							? invokeMcpTool(mcpServer, "second")
 							: new Promise((resolve) => setTimeout(resolve, 50)).then(() => invokeMcpTool(mcpServer, "second")),
 					]).then((results) => results.join(","))
-				: invokeMcpTool(mcpServer, "from gemini");
+				: invokeMcpTool(mcpServer, "from gemini", () => {
+					if (scenario !== "early-tool-turn-end") return;
+					setTimeout(() => {
+						if (bridgePromptId !== id) return;
+						bridgePromptId = undefined;
+						notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "MCP timed out" } });
+						send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+					}, 250);
+				});
 			void invocation.then(async (result) => {
 				if (text.includes("bridge delayed")) await new Promise((resolve) => setTimeout(resolve, 500));
 				if (bridgePromptId !== id) return;
@@ -265,7 +303,7 @@ for await (const line of rl) {
 				});
 				send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
 					...(reportUsage ? { usage: { inputTokens: 2400, outputTokens: 200, totalTokens: 2600 } } : {}) } });
-			});
+			}).catch(() => undefined);
 			continue;
 		}
 		if (scenario === "quota-exhausted") {
@@ -290,6 +328,13 @@ for await (const line of rl) {
 			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
 				usage: { inputTokens: 1000, cachedReadTokens: 400, outputTokens: 150, thoughtTokens: 50, totalTokens: 1200 } } });
+			continue;
+		}
+		if (text === "usage single net") {
+			usageUpdate(1200);
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
+				usage: { inputTokens: 600, cachedReadTokens: 400, outputTokens: 200, thoughtTokens: 50, totalTokens: 1200 } } });
 			continue;
 		}
 		if (!continuing && text.includes("hang")) {
@@ -367,12 +412,13 @@ function sessionConfigOptions() {
 	];
 }
 
-async function invokeMcpTool(server, text) {
+async function invokeMcpTool(server, text, onConnected) {
 	const headers = Object.fromEntries(server.headers.map((header) => [header.name, header.value]));
 	const client = new Client({ name: "fake-gemini", version: "1" }, { capabilities: {} });
 	const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } });
 	try {
 		await client.connect(transport);
+		onConnected?.();
 		const result = await client.callTool({ name: "pi_echo", arguments: { text } });
 		return result.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
 	} finally {
