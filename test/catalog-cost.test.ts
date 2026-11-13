@@ -58,16 +58,30 @@ describe("usageFromPrompt cost accounting", () => {
 		expect(usage.cost.totalFromProvider).toBe(false);
 	});
 
-	it("prices cache reads at the discounted rate", () => {
+	it("prices cache reads at the discounted rate for both net and gross input formats", () => {
 		const flash = FALLBACK_MODELS.find((model) => model.id === "gemini-3.8-flash")!;
-		const usage = usageFromPrompt(
-			{ stopReason: "end_turn", usage: { inputTokens: 1_000_000, outputTokens: 0, cachedReadTokens: 500_000, totalTokens: 1_500_000 } },
+		const netUsage = usageFromPrompt(
+			{
+				stopReason: "end_turn",
+				usage: { inputTokens: 1_000_000, outputTokens: 1000, thoughtTokens: 400, cachedReadTokens: 500_000, totalTokens: 1_501_000 },
+			},
 			flash,
 		);
-		expect(usage.cacheRead).toBe(500_000);
-		expect(usage.input).toBe(500_000);
-		expect(usage.cost.cacheRead).toBeCloseTo(500_000 * 0.075 / 1_000_000, 6);
-		expect(usage.cost.input).toBeCloseTo(500_000 * 0.75 / 1_000_000, 6);
+		expect(netUsage.cacheRead).toBe(500_000);
+		expect(netUsage.input).toBe(1_000_000);
+		expect(netUsage.output).toBe(1000);
+		expect(netUsage.cost.cacheRead).toBeCloseTo(500_000 * 0.075 / 1_000_000, 6);
+		expect(netUsage.cost.input).toBeCloseTo(1_000_000 * 0.75 / 1_000_000, 6);
+		expect(netUsage.cost.output).toBeCloseTo(1000 * 3.75 / 1_000_000, 6);
+
+		const grossUsage = usageFromPrompt(
+			{ stopReason: "end_turn", usage: { inputTokens: 1_000_000, outputTokens: 0, cachedReadTokens: 500_000, totalTokens: 1_000_000 } },
+			flash,
+		);
+		expect(grossUsage.cacheRead).toBe(500_000);
+		expect(grossUsage.input).toBe(500_000);
+		expect(grossUsage.cost.cacheRead).toBeCloseTo(500_000 * 0.075 / 1_000_000, 6);
+		expect(grossUsage.cost.input).toBeCloseTo(500_000 * 0.75 / 1_000_000, 6);
 	});
 
 	it("stays at zero cost when no model is supplied (legacy callers)", () => {
