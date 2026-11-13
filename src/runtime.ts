@@ -50,7 +50,7 @@ import {
 	type ToolOmission,
 	type PiToolInvocation,
 } from "./mcp/bridge.js";
-import type { PermissionMode } from "./config.js";
+import type { PermissionMode, ToolActivityMode } from "./config.js";
 import { resolveAcpModelId } from "./models.js";
 import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
@@ -143,11 +143,13 @@ export interface PermissionToolResult {
 export interface AntigravityRuntimeOptions {
 	maxBindings?: number;
 	idleMs?: number;
+	toolActivityMode?: ToolActivityMode;
 }
 
 export interface RuntimeSnapshot {
 	bindings: number;
 	permissionMode: PermissionMode;
+	toolActivityMode: ToolActivityMode;
 	metrics: ReturnType<RuntimeMetrics["snapshot"]>;
 	processes: Array<{
 		key: string;
@@ -194,6 +196,7 @@ export class AntigravityRuntime {
 	private readonly idleMs: number;
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
+	private toolActivityMode: ToolActivityMode;
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
 	private quotaInFlight: { epoch: number; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
 
@@ -206,6 +209,7 @@ export class AntigravityRuntime {
 		this.connectionFactory = connectionFactory ?? ((connectionOptions) => new AntigravityAcpConnection(connectionOptions));
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
+		this.toolActivityMode = options?.toolActivityMode ?? "compact";
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
@@ -462,6 +466,10 @@ export class AntigravityRuntime {
 		return change;
 	}
 
+	setToolActivityMode(mode: ToolActivityMode): void {
+		this.toolActivityMode = mode;
+	}
+
 	getPermission(requestId: string): PermissionView | undefined {
 		for (const binding of this.resolvedBindings) {
 			if (binding.permission?.id === requestId) return permissionView(binding.permission);
@@ -497,6 +505,7 @@ export class AntigravityRuntime {
 		return {
 			bindings: processes.length,
 			permissionMode: this.permissionMode,
+			toolActivityMode: this.toolActivityMode,
 			metrics: this.metrics.snapshot(),
 			processes,
 		};
@@ -1090,12 +1099,17 @@ export class AntigravityRuntime {
 			return;
 		}
 		if (!binding.writer) return;
-		const hasBridge = Boolean(binding.bridge && !binding.bridge.empty);
 		for (const activity of mapSessionUpdate(notification)) {
 			if (activity.type === "text") binding.writer.text(activity.delta);
 			else if (activity.type === "thought") binding.writer.thinking(activity.delta);
-			else if (activity.type === "plan" || (activity.type === "tool" && !hasBridge)) binding.writer.thinking(activity.text);
-			else if (activity.type === "usage") {
+			else if (activity.type === "plan") binding.writer.thinking(activity.text);
+			else if (activity.type === "tool") {
+				if (this.toolActivityMode === "full") {
+					binding.writer.thinking(activity.text);
+				} else if (this.toolActivityMode === "compact" && !activity.isUpdate) {
+					binding.writer.thinking(activity.compactText);
+				}
+			} else if (activity.type === "usage") {
 				binding.contextUsed = activity.used;
 				binding.inferences += 1;
 				if (!binding.writer.finished) binding.writer.message.usage.totalTokens = activity.used;

@@ -151,6 +151,57 @@ describe("extension entry point", () => {
 			"Usage this process: turns=1 tokens=1200 input=600 output=200 reasoning=50 cacheRead=400",
 		);
 	});
+
+	it("configures tool-activity via command arguments, interactive selector, and doctor output", async () => {
+		const { pi, ctx } = await load("parent");
+		const { loadConfig } = await import("../src/config.js");
+		const command = pi.commands.get("antigravity-acp")!;
+
+		expect(loadConfig().toolActivity).toBe("compact");
+
+		await command.handler("tool-activity off", ctx as never);
+		expect(loadConfig().toolActivity).toBe("off");
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity tool activity: off", "info"]);
+
+		const offTurn = await stream([user("emit tool activity")], "parent");
+		const offThinking = offTurn.content.filter((b) => b.type === "thinking").map((b) => b.thinking).join("\n");
+		expect(offThinking).not.toContain("[Antigravity tool:");
+
+		const selectCtx = createFakeContext({
+			sessionId: "parent",
+			cwd: root,
+			selectAnswer: (labels) => labels.find((label) => label.startsWith("full ")),
+		});
+		await command.handler("tool-activity", selectCtx as never);
+		expect(loadConfig().toolActivity).toBe("full");
+
+		const fullTurn = await stream([user("emit tool activity", 2)], "parent");
+		const fullThinking = fullTurn.content.filter((b) => b.type === "thinking").map((b) => b.thinking).join("\n");
+		expect(fullThinking).toContain("[Antigravity tool: pi_echo — in_progress]");
+		expect(fullThinking).toContain("[Antigravity tool update: tc-1 — completed]");
+
+		await command.handler("tool-activity invalid", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
+			"Usage: /antigravity-acp tool-activity [off|compact|full]",
+			"warning",
+		]);
+
+		await command.handler("doctor", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Tool activity mode: full");
+	});
+
+	it("preserves existing updates and permissions subcommand behavior alongside tool-activity", async () => {
+		const { pi, ctx } = await load("parent");
+		const { loadConfig } = await import("../src/config.js");
+		const command = pi.commands.get("antigravity-acp")!;
+
+		await command.handler("tool-activity off", ctx as never);
+		await command.handler("updates notify", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity runtime updates: notify", "info"]);
+		await command.handler("permissions auto-edit", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity permission mode: auto-edit.", "info"]);
+		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "off" });
+	});
 });
 
 describe("live quota", () => {

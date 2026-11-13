@@ -4,10 +4,12 @@ import path from "node:path";
 
 export type PermissionMode = "default" | "auto_edit" | "yolo";
 export type RuntimeUpdateMode = "automatic" | "notify" | "manual";
+export type ToolActivityMode = "off" | "compact" | "full";
 
 export interface AntigravityAcpConfig {
 	permissions: PermissionMode;
 	runtimeUpdates: RuntimeUpdateMode;
+	toolActivity: ToolActivityMode;
 }
 
 export function resolvePiAgentDir(): string {
@@ -47,15 +49,17 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as {
 			permissions?: unknown;
 			runtimeUpdates?: unknown;
+			toolActivity?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
+			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic" };
+	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
@@ -64,6 +68,10 @@ export function savePermissionMode(mode: PermissionMode, file = resolveConfigPat
 
 export function saveRuntimeUpdateMode(mode: RuntimeUpdateMode, file = resolveConfigPath()): void {
 	writeConfig({ ...loadConfig(file), runtimeUpdates: mode }, file);
+}
+
+export function saveToolActivityMode(mode: ToolActivityMode, file = resolveConfigPath()): void {
+	writeConfig({ ...loadConfig(file), toolActivity: mode }, file);
 }
 
 function writeConfig(config: AntigravityAcpConfig, file: string): void {
@@ -106,6 +114,10 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 
 export function isRuntimeUpdateMode(value: unknown): value is RuntimeUpdateMode {
 	return value === "automatic" || value === "notify" || value === "manual";
+}
+
+export function isToolActivityMode(value: unknown): value is ToolActivityMode {
+	return value === "off" || value === "compact" || value === "full";
 }
 
 export function permissionModeLabel(mode: PermissionMode): string {

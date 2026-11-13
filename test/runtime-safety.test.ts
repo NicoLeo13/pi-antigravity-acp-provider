@@ -772,28 +772,43 @@ describe("bridged update cleanliness and generated skill cleanup", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("suppresses Antigravity tool_call spam in thinking blocks when PiMcpBridge is active", async () => {
+	it("renders Antigravity tool activity according to toolActivityMode (compact default, off, full)", async () => {
 		const { runtime } = setup();
-		const bridged = await drain(
-			runtime.stream(model, { tools, messages: [user("emit tool activity")] }, { sessionId: "bridged-clean", apiKey: "test-key" }),
+		const compact = await drain(
+			runtime.stream(model, { tools, messages: [user("emit tool activity")] }, { sessionId: "tool-compact", apiKey: "test-key" }),
 		);
-		const bridgedThinking = bridged.content
+		const compactThinking = compact.content
 			.filter((block) => block.type === "thinking")
 			.map((block) => block.thinking)
 			.join("\n");
-		expect(bridgedThinking).toContain("Reasoning");
-		expect(bridgedThinking).toContain("[Antigravity plan]");
-		expect(bridgedThinking).not.toContain("[Antigravity tool:");
-		expect(bridgedThinking).not.toContain("[Antigravity tool update:");
+		expect(compactThinking).toContain("Reasoning");
+		expect(compactThinking).toContain("[Antigravity plan]");
+		expect(compactThinking).toContain("[Antigravity tool: pi_echo — in_progress]");
+		expect(compactThinking).not.toContain("[Antigravity tool update:");
 
-		const unbridged = await drain(
-			runtime.stream(model, { messages: [user("emit tool activity")] }, { sessionId: "unbridged-full", apiKey: "test-key" }),
+		runtime.setToolActivityMode("off");
+		const off = await drain(
+			runtime.stream(model, { tools, messages: [user("emit tool activity")] }, { sessionId: "tool-off", apiKey: "test-key" }),
 		);
-		const unbridgedThinking = unbridged.content
+		const offThinking = off.content
 			.filter((block) => block.type === "thinking")
 			.map((block) => block.thinking)
 			.join("\n");
-		expect(unbridgedThinking).toContain("[Antigravity tool: pi_echo");
+		expect(offThinking).toContain("Reasoning");
+		expect(offThinking).toContain("[Antigravity plan]");
+		expect(offThinking).not.toContain("[Antigravity tool:");
+		expect(offThinking).not.toContain("[Antigravity tool update:");
+
+		runtime.setToolActivityMode("full");
+		const full = await drain(
+			runtime.stream(model, { tools, messages: [user("emit tool activity")] }, { sessionId: "tool-full", apiKey: "test-key" }),
+		);
+		const fullThinking = full.content
+			.filter((block) => block.type === "thinking")
+			.map((block) => block.thinking)
+			.join("\n");
+		expect(fullThinking).toContain("[Antigravity tool: pi_echo — in_progress]");
+		expect(fullThinking).toContain("[Antigravity tool update: tc-1 — completed]");
 	});
 
 	it("removes newly created skills/system/run-workflow/SKILL.md on close while preserving pre-existing files", async () => {

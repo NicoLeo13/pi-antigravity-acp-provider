@@ -3,7 +3,7 @@ import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
 export type AcpActivity =
 	| { type: "text"; delta: string }
 	| { type: "thought"; delta: string }
-	| { type: "tool"; text: string }
+	| { type: "tool"; text: string; compactText: string; isUpdate: boolean }
 	| { type: "plan"; text: string }
 	| { type: "usage"; used: number }
 	| { type: "unknown"; updateType: string };
@@ -21,16 +21,28 @@ export function mapSessionUpdate(notification: SessionNotification): AcpActivity
 				: [{ type: "unknown", updateType: `agent_thought:${update.content.type}` }];
 		case "tool_call": {
 			const status = update.status ? ` — ${update.status}` : "";
-			return [{ type: "tool", text: `\n[Antigravity tool: ${clean(update.title)}${status}]\n` }];
+			const title = clean(update.title);
+			const singleLineTitle = title.replace(/\s+/gu, " ").trim() || "tool";
+			return [
+				{
+					type: "tool",
+					isUpdate: false,
+					text: `\n[Antigravity tool: ${title}${status}]\n`,
+					compactText: `\n[Antigravity tool: ${singleLineTitle}${status}]\n`,
+				},
+			];
 		}
 		case "tool_call_update": {
 			const label = update.title ? clean(update.title) : clean(update.toolCallId);
 			const status = update.status ? ` — ${update.status}` : "";
 			const details = toolContentText(update.content);
+			const singleLineLabel = label.replace(/\s+/gu, " ").trim() || "tool";
 			return [
 				{
 					type: "tool",
+					isUpdate: true,
 					text: `\n[Antigravity tool update: ${label}${status}]${details ? `\n${details}\n` : "\n"}`,
+					compactText: `\n[Antigravity tool update: ${singleLineLabel}${status}]\n`,
 				},
 			];
 		}
