@@ -16,10 +16,12 @@ import {
 import {
 	isPermissionMode,
 	isRuntimeUpdateMode,
+	isToolActivityMode,
 	loadConfig,
 	permissionModeLabel,
 	savePermissionMode,
 	saveRuntimeUpdateMode,
+	saveToolActivityMode,
 	type PermissionMode,
 } from "../src/config.js";
 import {
@@ -195,10 +197,34 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				);
 				return;
 			}
+			if (command === "tool-activity" || command.startsWith("tool-activity ")) {
+				let requested = command.slice("tool-activity".length).trim().toLowerCase();
+				if (!requested) {
+					const choices = [
+						"compact — show one line when an Antigravity tool starts (default)",
+						"off — hide Antigravity tool activity in thinking blocks",
+						"full — show all Antigravity tool calls, updates, and output details",
+					];
+					const selected = await ctx.ui.select("Antigravity tool activity", choices);
+					if (!selected) return;
+					requested = selected.split(" ", 1)[0]!;
+				}
+				if (!isToolActivityMode(requested)) {
+					ctx.ui.notify(
+						"Usage: /antigravity-acp tool-activity [off|compact|full]",
+						"warning",
+					);
+					return;
+				}
+				runtime.setToolActivityMode(requested);
+				saveToolActivityMode(requested);
+				ctx.ui.notify(`Antigravity tool activity: ${requested}`, "info");
+				return;
+			}
 			const verbose = command === "doctor --verbose";
 			if (command !== "doctor" && command !== "status" && !verbose) {
 				ctx.ui.notify(
-					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions]",
+					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity]",
 					"warning",
 				);
 				return;
@@ -221,6 +247,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					`Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
 					`Credential storage (preflight): ${describeCredentialStorage()}`,
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
+					`Tool activity mode: ${snapshot.toolActivityMode}`,
 					`Active bindings: ${snapshot.bindings}`,
 					formatMetrics(snapshot.metrics),
 					...snapshot.processes.flatMap((item) => [

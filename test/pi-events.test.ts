@@ -89,3 +89,45 @@ describe("PiEventWriter", () => {
 		expect(events[0]).toMatchObject({ type: "error", reason: "error" });
 	});
 });
+
+describe("mapSessionUpdate tool activity", () => {
+	it("normalizes multiline tool_call titles into single-line compactText and marks updates", async () => {
+		const { mapSessionUpdate } = await import("../src/acp/events.js");
+		const start = mapSessionUpdate({
+			sessionId: "s1",
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId: "tc-1",
+				title: "Run\n  npm\ttest",
+				kind: "execute",
+				status: "in_progress",
+			},
+		});
+		expect(start).toEqual([
+			{
+				type: "tool",
+				isUpdate: false,
+				text: "\n[Antigravity tool: Run\n  npm\ttest — in_progress]\n",
+				compactText: "\n[Antigravity tool: Run npm test — in_progress]\n",
+			},
+		]);
+
+		const update = mapSessionUpdate({
+			sessionId: "s1",
+			update: {
+				sessionUpdate: "tool_call_update",
+				toolCallId: "tc-1",
+				status: "completed",
+				content: [{ type: "content", content: { type: "text", text: "huge output" } }],
+			},
+		});
+		expect(update[0]).toMatchObject({
+			type: "tool",
+			isUpdate: true,
+		});
+		if (update[0]?.type === "tool") {
+			expect(update[0].text).toContain("huge output");
+			expect(update[0].compactText).toBe("\n[Antigravity tool update: tc-1 — completed]\n");
+		}
+	});
+});
