@@ -25,7 +25,12 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function setup(scenario?: string, mode: PermissionMode = "yolo", store?: AcpSessionStore) {
+function setup(
+	scenario?: string,
+	mode: PermissionMode = "yolo",
+	store?: AcpSessionStore,
+	runtimeOptions?: { maxBindings?: number; idleMs?: number },
+) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-safety-")); roots.push(root);
 	const log = path.join(root, "calls.jsonl"); fs.writeFileSync(log, "");
 	const connections: AntigravityAcpConnection[] = [];
@@ -33,7 +38,7 @@ function setup(scenario?: string, mode: PermissionMode = "yolo", store?: AcpSess
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
 			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
 		connections.push(connection); return connection;
-	}, mode, store);
+	}, mode, store, runtimeOptions);
 	runtimes.push(runtime);
 	const entries = () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { method: string; prompt?: unknown; mode?: string });
 	return { root, runtime, connections, entries };
@@ -237,6 +242,97 @@ describe("session lifecycle", () => {
 		expect(connections).toHaveLength(1);
 		expect((await runtime.snapshot()).bindings).toBe(0);
 	});
+
+	it("evicts idle bindings after idleMs while preserving saved records for resume", async () => {
+		const fixture = setup();
+		const store = new AcpSessionStore(path.join(fixture.root, "sessions.json"));
+		const { runtime, connections } = setup(undefined, "yolo", store, { idleMs: 60 });
+		const first = await turn(runtime, [user("a")], "idle-a");
+		expect(first.stopReason).toBe("stop");
+		expect(connections[0]!.process.alive).toBe(true);
+
+		await connections[0]!.process.exited;
+		await vi.waitFor(async () => expect((await runtime.snapshot()).bindings).toBe(0));
+		expect(store.get("idle-a")).toBeDefined();
+
+		const resumed = await turn(runtime, [user("a"), first, user("next", 2)], "idle-a");
+		expect(resumed.stopReason).toBe("stop");
+		expect(connections).toHaveLength(2);
+		expect((await runtime.snapshot()).processes[0]?.restored).toBe(true);
+	});
+
+	it("never evicts a binding with a parked Pi tool call", async () => {
+		const { runtime } = setup(undefined, "yolo", undefined, { idleMs: 40 });
+		const first = await drain(runtime.stream(model, { tools, messages: [user("use bridge")] }, { sessionId: "parked-idle", apiKey: "test-key" }));
+		expect(first.stopReason).toBe("toolUse");
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		const snapshot = await runtime.snapshot();
+		expect(snapshot.bindings).toBe(1);
+		expect(snapshot.processes[0]?.alive).toBe(true);
+		expect(snapshot.processes[0]?.waitingForTools).toBe(1);
+	});
+
+	it("evicts the oldest idle binding when maxBindings is exceeded", async () => {
+		const { runtime, connections } = setup(undefined, "yolo", undefined, { maxBindings: 2, idleMs: 60_000 });
+		await turn(runtime, [user("s1")], "S1");
+		await turn(runtime, [user("s2")], "S2");
+		await turn(runtime, [user("s3")], "S3");
+
+		await connections[0]!.process.exited;
+		expect(connections[0]!.process.alive).toBe(false);
+		expect(connections[1]!.process.alive).toBe(true);
+		expect(connections[2]!.process.alive).toBe(true);
+		expect((await runtime.snapshot()).bindings).toBe(2);
+	});
+
+	it("aborts a queued turn whose closeSession runs before binding creation", async () => {
+		const { runtime, connections } = setup();
+		let releaseMode!: () => void;
+		(runtime as unknown as { modeChanges: Promise<void> }).modeChanges = new Promise<void>((resolve) => {
+			releaseMode = resolve;
+		});
+
+		const pending = turn(runtime, [user("early-close")], "race-close");
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			await runtime.closeSession("race-close");
+		} finally {
+			releaseMode();
+		}
+
+		const message = await pending;
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toContain("closed");
+		expect(connections).toHaveLength(0);
+		expect((await runtime.snapshot()).bindings).toBe(0);
+	});
+
+	it("never evicts an existing binding while a new turn for it is entering setup", async () => {
+		const { runtime, connections } = setup(undefined, "yolo", undefined, { maxBindings: 1, idleMs: 60_000 });
+		const first = await turn(runtime, [user("a")], "keep-busy");
+		expect(first.stopReason).toBe("stop");
+
+		let releaseMode!: () => void;
+		(runtime as unknown as { modeChanges: Promise<void> }).modeChanges = new Promise<void>((resolve) => {
+			releaseMode = resolve;
+		});
+
+		// Trigger capacity and idle eviction while "keep-busy" is between runQueued entry and setting its queue.
+		const busyTurn = turn(runtime, [user("a"), first, user("b", 2)], "keep-busy");
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			(runtime as unknown as { idleMs: number }).idleMs = 0;
+			await (runtime as unknown as { evictForCapacity: () => Promise<void> }).evictForCapacity();
+			await (runtime as unknown as { evictExpiredBindings: () => Promise<void> }).evictExpiredBindings();
+			expect(connections[0]!.process.alive).toBe(true);
+		} finally {
+			releaseMode();
+		}
+
+		const second = await busyTurn;
+		expect(second.stopReason).toBe("stop");
+		expect(connections).toHaveLength(1);
+	});
 });
 
 describe("instruction updates during continuations", () => {
@@ -396,6 +492,45 @@ describe("abort cleanup", () => {
 		binding.turnCompletion = new Promise<void>(() => undefined); controller.abort(); complete(); await pending;
 		expect(binding.connection.cancel).not.toHaveBeenCalled(); expect(binding.connection.close).not.toHaveBeenCalled();
 	});
+
+	it("clears parked Pi tools when the ACP turn ends early and completes the next toolResult turn without hanging", async () => {
+		const { runtime, entries } = setup("early-tool-turn-end");
+		const first = await drain(runtime.stream(model, { tools, messages: [user("bridge")] }, { sessionId: "early-end", apiKey: "test-key" }));
+		expect(first.stopReason).toBe("toolUse");
+		const call = first.content.find((block) => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("missing tool");
+
+		await vi.waitFor(async () => {
+			expect((await runtime.snapshot()).processes[0]?.waitingForTools).toBe(0);
+		}, { timeout: 2000 });
+
+		const second = await Promise.race([
+			drain(runtime.stream(model, {
+				tools,
+				messages: [
+					user("bridge"),
+					first,
+					{ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: "late tool result" }], isError: false, timestamp: 2 },
+				],
+			}, { sessionId: "early-end", apiKey: "test-key" })),
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stream hung after early ACP turn end")), 2000)),
+		]);
+		expect(second.stopReason).toBe("stop");
+		const prompts = entries().filter((entry) => entry.method === "session/prompt");
+		expect(prompts).toHaveLength(2);
+		expect(JSON.stringify(prompts[1]?.prompt)).toContain("late tool result");
+	});
+
+	it("fails the Pi stream instead of hanging if runQueued resolves without finishing the writer", async () => {
+		const { runtime } = setup();
+		vi.spyOn(runtime as unknown as { runQueued: () => Promise<void> }, "runQueued").mockResolvedValue(undefined);
+		const message = await Promise.race([
+			turn(runtime, [user("hello")], "unfinished-writer"),
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("stream hung with unfinished writer")), 1000)),
+		]);
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toContain("without completing");
+	});
 });
 
 describe("quota exhaustion", () => {
@@ -520,7 +655,7 @@ describe("tool projection diagnostics", () => {
 		expect(JSON.stringify(prompts[1]?.prompt)).toContain(`tool call echo id=${call.id}`);
 	});
 
-	it("names all capped tools, excludes the permission broker and fingerprints descriptions/omissions", () => {
+	it("projects up to 64 tools, excludes the permission broker and fingerprints descriptions/omissions", () => {
 		const active = Array.from({ length: 67 }, (_, i) => ({ name: `t${i}`, description: "tool", parameters: Type.Object({}) }));
 		const bridge = new PiMcpBridge({ tools: [...active, { name: PERMISSION_TOOL_NAME, description: "broker", parameters: Type.Object({}) }], onCall: async () => ({ content: [] }) });
 		expect(bridge.omissions.map((entry) => entry.name)).toEqual(["t64", "t65", "t66"]);
@@ -700,6 +835,55 @@ describe("throwaway conversations", () => {
 		await runtime.quota(undefined);
 		await connections[0]!.process.exited;
 		expect(store.files()).toEqual([...userFiles, "fake-session.db", "fake-session.db-shm", "fake-session.db-wal", "fake-session.meta"].sort());
+	});
+});
+
+describe("bridged update cleanliness and generated skill cleanup", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+
+	it("suppresses Antigravity tool_call spam in thinking blocks when PiMcpBridge is active", async () => {
+		const { runtime } = setup();
+		const bridged = await drain(
+			runtime.stream(model, { tools, messages: [user("emit tool activity")] }, { sessionId: "bridged-clean", apiKey: "test-key" }),
+		);
+		const bridgedThinking = bridged.content
+			.filter((block) => block.type === "thinking")
+			.map((block) => block.thinking)
+			.join("\n");
+		expect(bridgedThinking).toContain("Reasoning");
+		expect(bridgedThinking).toContain("[Antigravity plan]");
+		expect(bridgedThinking).not.toContain("[Antigravity tool:");
+		expect(bridgedThinking).not.toContain("[Antigravity tool update:");
+
+		const unbridged = await drain(
+			runtime.stream(model, { messages: [user("emit tool activity")] }, { sessionId: "unbridged-full", apiKey: "test-key" }),
+		);
+		const unbridgedThinking = unbridged.content
+			.filter((block) => block.type === "thinking")
+			.map((block) => block.thinking)
+			.join("\n");
+		expect(unbridgedThinking).toContain("[Antigravity tool: pi_echo");
+	});
+
+	it("preserves user-authored skills/system/run-workflow/SKILL.md created during a session", async () => {
+		const userCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acp-skill-user-"));
+		roots.push(userCwd);
+		vi.spyOn(process, "cwd").mockReturnValue(userCwd);
+
+		const { runtime } = setup();
+		const first = await turn(runtime, [user("hello")], "skill-user-preserve");
+		expect(first.stopReason).toBe("stop");
+
+		const userFile = path.join(userCwd, "skills", "system", "run-workflow", "SKILL.md");
+		fs.mkdirSync(path.dirname(userFile), { recursive: true });
+		fs.writeFileSync(userFile, "# user-authored\n");
+
+		await runtime.closeSession("skill-user-preserve");
+		expect(fs.existsSync(userFile)).toBe(true);
+		expect(fs.readFileSync(userFile, "utf8")).toBe("# user-authored\n");
 	});
 });
 

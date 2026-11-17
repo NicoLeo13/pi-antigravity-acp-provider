@@ -31,6 +31,8 @@ import { AcpSessionStore } from "./acp/session-store.js";
 import { sessionModels, sessionModes, type AcpModelInfo, type AcpNewSessionResponse, type SessionState } from "./acp/session-state.js";
 import { parseUsageQuota, type AntigravityQuotaSnapshot } from "./acp/usage-quota.js";
 import {
+	DEFAULT_BINDING_IDLE_MS,
+	DEFAULT_MAX_BINDINGS,
 	MANAGED_AUTH_MARKER,
 	PERMISSION_RESULT_KIND,
 	PERMISSION_TOOL_NAME,
@@ -102,6 +104,8 @@ interface Binding {
 	abortRequested: boolean;
 	piSessionId: string | undefined;
 	restored: boolean;
+	lastUsedAt: number;
+	lastUsedSeq: number;
 }
 
 export interface PermissionView {
@@ -120,6 +124,11 @@ export interface PermissionToolResult {
 	requestId: string;
 	optionId?: string;
 	cancelled: boolean;
+}
+
+export interface AntigravityRuntimeOptions {
+	maxBindings?: number;
+	idleMs?: number;
 }
 
 export interface RuntimeSnapshot {
@@ -150,16 +159,24 @@ export type AntigravityConnectionFactory = (options: AntigravityConnectionOption
 export class AntigravityRuntime {
 	private readonly bindings = new Map<string, Promise<Binding>>();
 	private readonly resolvedBindings = new Set<Binding>();
+	private readonly bindingPromises = new WeakMap<Binding, Promise<Binding>>();
 	private disposed = false;
 	private closePromise: Promise<void> | undefined;
 	private bindingEpoch = 0;
+	private readonly sessionEpochs = new Map<string, number>();
+	private readonly busyKeys = new Map<string, number>();
 	private readonly activeConnections = new Set<AntigravityAcpConnection>();
 	private readonly queues = new Map<string, Promise<void>>();
 	private modeChanges = Promise.resolve();
+	private evictionQueue: Promise<void> = Promise.resolve();
+	private idleCleanupTimer: ReturnType<typeof setInterval> | undefined;
+	private usageSeq = 0;
 
 	private readonly connectionFactory: AntigravityConnectionFactory;
 	private readonly ensureAgent: boolean;
 	private readonly sessionStore: AcpSessionStore | undefined;
+	private readonly maxBindings: number;
+	private readonly idleMs: number;
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
@@ -169,11 +186,14 @@ export class AntigravityRuntime {
 		connectionFactory?: AntigravityConnectionFactory,
 		permissionMode: PermissionMode = "yolo",
 		sessionStore?: AcpSessionStore,
+		options?: AntigravityRuntimeOptions,
 	) {
-		this.connectionFactory = connectionFactory ?? ((options) => new AntigravityAcpConnection(options));
+		this.connectionFactory = connectionFactory ?? ((connectionOptions) => new AntigravityAcpConnection(connectionOptions));
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
+		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
+		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
 	}
 
 	stream(model: AntigravityModel, context: Context, options: SimpleStreamOptions = {}): PiEventWriter {
@@ -188,9 +208,18 @@ export class AntigravityRuntime {
 				tools: getCurrentTools(transcript.messages),
 			};
 			currentSystemInstructions(resolvedContext);
-			void this.runQueued(model, resolvedContext, options, writer).catch((error: unknown) => {
-				writer.fail(error, options.signal?.aborted === true || isAbort(error));
-			});
+			void this.runQueued(model, resolvedContext, options, writer)
+				.then(() => {
+					if (!writer.finished) {
+						writer.fail(
+							new AntigravityAcpError("protocol", "Antigravity ACP stream ended without completing the response"),
+							options.signal?.aborted === true,
+						);
+					}
+				})
+				.catch((error: unknown) => {
+					writer.fail(error, options.signal?.aborted === true || isAbort(error));
+				});
 		} catch (error) {
 			writer.fail(error, options.signal?.aborted === true || isAbort(error));
 		}
@@ -204,13 +233,14 @@ export class AntigravityRuntime {
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
 		if (signal?.aborted) throw abortError();
 		this.assertEpoch(epoch);
-		const connection = this.createConnection({ cwd: process.cwd() });
+		const cwd = process.cwd();
+		const connection = this.createConnection({ cwd });
 		try {
 			const initialize = await connection.initialize(signal);
 			this.assertEpoch(epoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertEpoch(epoch);
-			const session = await connection.newSession(process.cwd(), signal);
+			const session = await connection.newSession(cwd, signal);
 			this.assertEpoch(epoch);
 			return sessionModels(session)?.availableModels ?? [];
 		} finally {
@@ -254,8 +284,9 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		let sessionId: string | undefined;
 		let text = "";
+		const cwd = process.cwd();
 		const connection = this.createConnection({
-			cwd: process.cwd(),
+			cwd,
 			promptIdleTimeoutMs: QUOTA_TIMEOUT_MS,
 			handlers: {
 				onUpdate: ({ sessionId: id, update }) => {
@@ -269,7 +300,7 @@ export class AntigravityRuntime {
 			this.assertEpoch(epoch);
 			await authenticateForCredential(connection, initialize, apiKey);
 			this.assertEpoch(epoch);
-			sessionId = (await connection.newSession(process.cwd())).sessionId;
+			sessionId = (await connection.newSession(cwd)).sessionId;
 			this.assertEpoch(epoch);
 			// agy answers a bare "/usage" text block itself: no model turn, no quota spent.
 			await connection.prompt({ sessionId, prompt: [{ type: "text", text: "/usage" }] });
@@ -292,8 +323,9 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		const useManualOAuth = manualInteraction !== undefined && shouldUseHeadlessOAuth();
 		const relay = useManualOAuth ? new HeadlessOAuthRelay() : undefined;
+		const cwd = process.cwd();
 		const connection = this.createConnection({
-			cwd: process.cwd(),
+			cwd,
 			...(relay ? { env: relay.env } : {}),
 		});
 		try {
@@ -339,7 +371,7 @@ export class AntigravityRuntime {
 			}
 			await authentication;
 			this.assertEpoch(epoch);
-			await connection.newSession(process.cwd(), signal);
+			await connection.newSession(cwd, signal);
 			this.assertEpoch(epoch);
 		} finally {
 			relay?.dispose();
@@ -356,13 +388,14 @@ export class AntigravityRuntime {
 		const epoch = this.bindingEpoch;
 		if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
 		this.assertEpoch(epoch);
-		const connection = this.createConnection({ cwd: process.cwd() });
+		const cwd = process.cwd();
+		const connection = this.createConnection({ cwd });
 		try {
 			const initialize = await connection.initialize();
 			this.assertEpoch(epoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertEpoch(epoch);
-			await connection.newSession(process.cwd(), signal);
+			await connection.newSession(cwd, signal);
 			this.assertEpoch(epoch);
 		} finally {
 			await connection.close();
@@ -454,6 +487,7 @@ export class AntigravityRuntime {
 	/** Closes one Pi session's binding but keeps its saved record so a later turn can resume it. */
 	async closeSession(piSessionId: string): Promise<void> {
 		const key = `sid:${piSessionId}`;
+		this.bumpSessionEpoch(key);
 		this.queues.delete(key);
 		const binding = await this.bindings.get(key)?.catch(() => undefined);
 		if (!binding) return;
@@ -462,7 +496,10 @@ export class AntigravityRuntime {
 			abortTurn(binding);
 			void binding.connection.cancel(binding.session.sessionId).catch(() => undefined);
 			let timer: ReturnType<typeof setTimeout> | undefined;
-			await Promise.race([completion, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1_500); })]);
+			await Promise.race([completion, new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, 1_500);
+				timer.unref?.();
+			})]);
 			clearTimeout(timer);
 		}
 		await this.dropBinding(key, binding, false);
@@ -477,6 +514,7 @@ export class AntigravityRuntime {
 			cancelPiTools(binding, "Provider shut down before Pi returned the tool result");
 		}
 		this.resolvedBindings.clear();
+		this.syncIdleCleanupTimer(true);
 		// Includes authentication/discovery and sessions still initializing, not just warm bindings.
 		await Promise.allSettled([...this.activeConnections].map((connection) => connection.close()));
 		await Promise.allSettled(
@@ -498,226 +536,259 @@ export class AntigravityRuntime {
 	): Promise<void> {
 		this.assertActive();
 		const epoch = this.bindingEpoch;
-		if (this.ensureAgent) await ensureAntigravityAcpReady();
-		await this.modeChanges;
-		this.assertEpoch(epoch);
 		// One-off requests (e.g. compaction summaries) never keep or save a session.
 		const persistent = Boolean(options.sessionId) && options.cacheRetention !== "none";
 		const key = persistent
 			? `sid:${options.sessionId}`
 			: (this.findContinuationKey(context) ?? `ephemeral:${crypto.randomUUID()}`);
-		const tools = context.tools ?? [];
-		const acpModelId = resolveAcpModelId(model, options.reasoning);
-		let binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-		await this.modeChanges;
-		this.assertEpoch(epoch);
-		// Check before continuation early returns as well as before fresh prompts.
-		if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||
-			binding.toolFingerprint !== piToolFingerprint(tools)) {
-			await this.invalidateBinding(binding);
-			binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-		} else if (isConnectionDead(binding.connection)) {
-			await this.dropBinding(key, binding, false);
-			binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-		}
-
-		// A permission tool result resumes the still-running ACP prompt rather than
-		// starting a second Antigravity turn.
-		if (binding.permission) {
-			const pending = binding.permission;
-			const result = findPermissionResult(context, pending.id);
-			if (!result) {
-				cancelPermission(binding);
-				await this.dropBinding(key, binding);
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-			} else {
-				binding.writer = writer;
-				this.noteContinuationInstructions(binding, context);
-				binding.pendingContextCount = context.messages.length;
-				binding.pendingContextFingerprint = messagesFingerprint(context.messages);
-				this.commitProgress(binding);
-				binding.permission = undefined;
-				clearTimeout(pending.timer);
-				if (
-					!result.cancelled &&
-					result.optionId &&
-					pending.request.options.some((option) => option.optionId === result.optionId)
-				) {
-					pending.resolve({ outcome: { outcome: "selected", optionId: result.optionId } });
-				} else {
-					pending.resolve({ outcome: { outcome: "cancelled" } });
-				}
-				await this.awaitContinuation(binding, options.signal);
-				return;
-			}
-		}
-
-		if (binding.pendingTools.size > 0) {
-			const results = [...binding.pendingTools.values()].map((pending) => ({
-				pending,
-				message: findToolResult(context, pending.invocation.id, pending.invocation.name),
-			}));
-			if (results.some((result) => result.message === undefined)) {
-				cancelPiTools(binding, "Pi continued without returning every requested tool result");
-				await this.dropBinding(key, binding);
-				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-			} else {
-				binding.writer = writer;
-				this.noteContinuationInstructions(binding, context);
-				binding.pendingContextCount = context.messages.length;
-				binding.pendingContextFingerprint = messagesFingerprint(context.messages);
-				this.commitProgress(binding);
-				for (const { pending, message } of results) {
-					binding.pendingTools.delete(pending.invocation.id);
-					pending.resolve(toMcpToolResult(message as ToolResultMessage));
-				}
-				await this.awaitContinuation(binding, options.signal);
-				return;
-			}
-		}
-
-		const previous = this.queues.get(key) ?? Promise.resolve();
-		let release!: () => void;
-		const queue = new Promise<void>((resolve) => { release = resolve; });
-		this.queues.set(key, queue);
-		await previous;
-
-		let completeTurn: (() => void) | undefined;
-		let onTurnAbort: (() => void) | undefined;
+		const sessionEpoch = this.sessionEpoch(key);
+		this.retainBusyKey(key);
 		try {
+			if (this.ensureAgent) await ensureAntigravityAcpReady();
 			await this.modeChanges;
-			this.assertEpoch(epoch);
-			// A queued caller may hold an obsolete binding after shutdown/mode changes.
-			binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-			if (
-				binding.needsReconstruction || binding.mode !== this.permissionMode ||
-				this.confirmedMode(binding) !== this.permissionMode ||
-				binding.toolFingerprint !== piToolFingerprint(tools) ||
-				context.messages.length < binding.messageCount ||
-				messagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
-					binding.historyFingerprint
-			) {
-				await this.dropBinding(key, binding, true);
+			this.assertSessionEpoch(key, epoch, sessionEpoch);
+			const tools = context.tools ?? [];
+			const acpModelId = resolveAcpModelId(model, options.reasoning);
+			let binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+			await this.modeChanges;
+			this.assertSessionEpoch(key, epoch, sessionEpoch);
+			// Check before continuation early returns as well as before fresh prompts.
+			if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||
+				binding.toolFingerprint !== piToolFingerprint(tools)) {
+				await this.invalidateBinding(binding);
+				this.assertSessionEpoch(key, epoch, sessionEpoch);
+				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+			} else if (isConnectionDead(binding.connection)) {
+				await this.dropBinding(key, binding, false);
+				this.assertSessionEpoch(key, epoch, sessionEpoch);
 				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
 			}
-			binding.writer = writer;
-			if (binding.modelId !== acpModelId) {
-				try {
-					await binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);
-					binding.modelId = acpModelId;
-				} catch (error) {
-					// A split selection can change the base before effort fails. Neither
-					// the warm cache nor its saved session is trustworthy after failure.
-					await this.invalidateBinding(binding);
-					throw error;
+
+			// A permission tool result resumes the still-running ACP prompt rather than
+			// starting a second Antigravity turn.
+			if (binding.permission && !binding.turnCompletion) {
+				cancelPermission(binding);
+			}
+			if (binding.permission) {
+				const pending = binding.permission;
+				const result = findPermissionResult(context, pending.id);
+				if (!result) {
+					cancelPermission(binding);
+					await this.dropBinding(key, binding);
+					this.assertSessionEpoch(key, epoch, sessionEpoch);
+					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				} else {
+					binding.writer = writer;
+					this.touchBinding(binding);
+					this.noteContinuationInstructions(binding, context);
+					binding.pendingContextCount = context.messages.length;
+					binding.pendingContextFingerprint = messagesFingerprint(context.messages);
+					this.commitProgress(binding);
+					binding.permission = undefined;
+					clearTimeout(pending.timer);
+					if (
+						!result.cancelled &&
+						result.optionId &&
+						pending.request.options.some((option) => option.optionId === result.optionId)
+					) {
+						pending.resolve({ outcome: { outcome: "selected", optionId: result.optionId } });
+					} else {
+						pending.resolve({ outcome: { outcome: "cancelled" } });
+					}
+					await this.awaitContinuation(binding, options.signal);
+					if (!writer.finished) {
+						writer.fail(
+							new AntigravityAcpError("protocol", "Antigravity ACP permission continuation ended without completing the response"),
+							options.signal?.aborted === true,
+						);
+					}
+					return;
 				}
 			}
 
-			const fresh = binding.messageCount === 0;
-			let unseenStart = binding.messageCount;
-			const expected = context.messages[unseenStart];
-			if (
-				!fresh &&
-				expected?.role === "assistant" &&
-				binding.expectedAssistantFingerprint === messageFingerprint(expected)
-			) {
-				unseenStart += 1;
+			if (binding.pendingTools.size > 0 && !binding.turnCompletion) {
+				cancelPiTools(binding, "Antigravity turn ended before Pi returned the tool result");
 			}
-			const parts = adaptPromptToCapabilities(
-				buildPromptParts(context, fresh, unseenStart),
-				binding.initialize,
-			);
-			await this.modeChanges;
-			this.assertEpoch(epoch);
-			if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode) {
-				await this.invalidateBinding(binding);
-				throw new AntigravityAcpError("protocol", "Permission mode changed before prompting; retry the turn");
+			if (binding.pendingTools.size > 0) {
+				const results = [...binding.pendingTools.values()].map((pending) => ({
+					pending,
+					message: findToolResult(context, pending.invocation.id, pending.invocation.name),
+				}));
+				if (results.some((result) => result.message === undefined)) {
+					cancelPiTools(binding, "Pi continued without returning every requested tool result");
+					await this.dropBinding(key, binding);
+					this.assertSessionEpoch(key, epoch, sessionEpoch);
+					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				} else {
+					binding.writer = writer;
+					this.touchBinding(binding);
+					this.noteContinuationInstructions(binding, context);
+					binding.pendingContextCount = context.messages.length;
+					binding.pendingContextFingerprint = messagesFingerprint(context.messages);
+					this.commitProgress(binding);
+					for (const { pending, message } of results) {
+						binding.pendingTools.delete(pending.invocation.id);
+						pending.resolve(toMcpToolResult(message as ToolResultMessage));
+					}
+					await this.awaitContinuation(binding, options.signal);
+					if (!writer.finished) {
+						writer.fail(
+							new AntigravityAcpError("protocol", "Antigravity ACP tool continuation ended without completing the response"),
+							options.signal?.aborted === true,
+						);
+					}
+					return;
+				}
 			}
-			if (isConnectionDead(binding.connection)) {
-				await this.dropBinding(key, binding, false);
-				throw new AntigravityAcpError("process_exit", "Antigravity ACP connection closed before prompting");
+
+			const previous = this.queues.get(key) ?? Promise.resolve();
+			let release!: () => void;
+			const queue = new Promise<void>((resolve) => { release = resolve; });
+			this.queues.set(key, queue);
+			await previous;
+
+			let completeTurn: (() => void) | undefined;
+			let onTurnAbort: (() => void) | undefined;
+			try {
+				await this.modeChanges;
+				this.assertSessionEpoch(key, epoch, sessionEpoch);
+				// A queued caller may hold an obsolete binding after shutdown/mode changes.
+				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				if (
+					binding.needsReconstruction || binding.mode !== this.permissionMode ||
+					this.confirmedMode(binding) !== this.permissionMode ||
+					binding.toolFingerprint !== piToolFingerprint(tools) ||
+					context.messages.length < binding.messageCount ||
+					messagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
+						binding.historyFingerprint
+				) {
+					await this.dropBinding(key, binding, true);
+					this.assertSessionEpoch(key, epoch, sessionEpoch);
+					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
+				}
+				binding.writer = writer;
+				if (binding.modelId !== acpModelId) {
+					try {
+						await binding.connection.setModel(binding.session.sessionId, acpModelId, options.signal);
+						binding.modelId = acpModelId;
+					} catch (error) {
+						// A split selection can change the base before effort fails. Neither
+						// the warm cache nor its saved session is trustworthy after failure.
+						await this.invalidateBinding(binding);
+						throw error;
+					}
+				}
+
+				const fresh = binding.messageCount === 0;
+				let unseenStart = binding.messageCount;
+				const expected = context.messages[unseenStart];
+				if (
+					!fresh &&
+					expected?.role === "assistant" &&
+					binding.expectedAssistantFingerprint === messageFingerprint(expected)
+				) {
+					unseenStart += 1;
+				}
+				const parts = adaptPromptToCapabilities(
+					buildPromptParts(context, fresh, unseenStart),
+					binding.initialize,
+				);
+				await this.modeChanges;
+				this.assertSessionEpoch(key, epoch, sessionEpoch);
+				if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode) {
+					await this.invalidateBinding(binding);
+					throw new AntigravityAcpError("protocol", "Permission mode changed before prompting; retry the turn");
+				}
+				if (isConnectionDead(binding.connection)) {
+					await this.dropBinding(key, binding, false);
+					throw new AntigravityAcpError("process_exit", "Antigravity ACP connection closed before prompting");
+				}
+				binding.instructionsFingerprint = instructionFingerprint(context);
+				binding.needsReconstruction = false;
+				binding.pendingContextCount = context.messages.length;
+				binding.pendingContextFingerprint = messagesFingerprint(context.messages);
+				binding.contextUsed = undefined;
+				binding.inferences = 0;
+				binding.turnCompletion = new Promise<void>((resolve) => {
+					completeTurn = resolve;
+				});
+				this.touchBinding(binding);
+				if (options.signal) {
+					const promptBinding = binding;
+					onTurnAbort = () => abortTurn(promptBinding);
+					options.signal.addEventListener("abort", onTurnAbort, { once: true });
+					if (options.signal.aborted) onTurnAbort();
+				}
+				const response = await binding.connection.prompt(
+					{ sessionId: binding.session.sessionId, prompt: parts.prompt },
+					options.signal,
+				);
+				if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
+				const activeWriter = binding.writer ?? writer;
+				if (binding.abortRequested) throw abortError();
+				const usage = usageFromPrompt(response, model);
+				this.metrics.record(response, usage);
+				// agy reports exhaustion as an ordinary reply; fail it before the turn is persisted.
+				const quota = usage.totalTokens === 0 || response.stopReason === "refusal"
+					? quotaExhaustion(activeWriter.message.content.map((block) => block.type === "text" ? block.text : "").join(""))
+					: undefined;
+				if (quota) {
+					throw new AntigravityAcpError("quota",
+						`Antigravity quota exceeded for ${binding.modelId}.${quota.resetAt ? ` Resets at ${quota.resetAt}.` : ""}`);
+				}
+				if (binding.contextUsed !== undefined) {
+					// Pi checks input + cacheRead for silent overflow, not totalTokens. For multiple inferences,
+					// only the latest context size is known, not its cache split; metrics above keep billed totals.
+					// agy adds cache reads to `used` twice; only a single inference's cache count is exact,
+					// so multiple inferences still use `used` as an upper bound.
+					activeWriter.message.usage = {
+						...usage,
+						input: binding.inferences > 1 ? binding.contextUsed : usage.input,
+						cacheRead: binding.inferences > 1 ? 0 : usage.cacheRead,
+						totalTokens: binding.inferences === 1 ? Math.max(0, binding.contextUsed - usage.cacheRead) : binding.contextUsed,
+					};
+				} else activeWriter.message.usage = usage;
+				activeWriter.message.rawStopReason = response.stopReason;
+				binding.messageCount = binding.pendingContextCount || parts.messageCount;
+				binding.historyFingerprint = binding.pendingContextFingerprint;
+				binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message);
+				this.persistBinding(binding);
+				switch (response.stopReason) {
+					case "cancelled":
+						throw abortError();
+					case "max_tokens":
+					case "max_turn_requests":
+						activeWriter.done("length");
+						break;
+					default:
+						activeWriter.done("stop");
+				}
+			} catch (error) {
+				if ((binding.permission || binding.pendingTools.size > 0) && (binding.writer ?? writer).finished) {
+					this.commitProgress(binding, (binding.writer ?? writer).message);
+				}
+				if (isAbort(error) || binding.abortRequested) abortTurn(binding);
+				// Evict closing connections before failing the stream can wake a retry.
+				if (isConnectionDead(binding.connection)) await this.dropBinding(key, binding);
+				binding.writer?.fail(error, isAbort(error));
+				throw error;
+			} finally {
+				if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
+				// ACP can time out before Pi's tool finishes; replay late results in a new prompt, not a dead continuation.
+				cancelPermission(binding);
+				cancelPiTools(binding, "Antigravity prompt ended before Pi returned the tool result");
+				completeTurn?.();
+				binding.turnCompletion = undefined;
+				binding.abortRequested = false;
+				binding.writer = undefined;
+				this.touchBinding(binding);
+				release();
+				if (this.queues.get(key) === queue) this.queues.delete(key);
+				if (!persistent) await this.dropBinding(key, binding);
+				else if (this.bindings.size > this.maxBindings) void this.evictForCapacity();
 			}
-			binding.instructionsFingerprint = instructionFingerprint(context);
-			binding.needsReconstruction = false;
-			binding.pendingContextCount = context.messages.length;
-			binding.pendingContextFingerprint = messagesFingerprint(context.messages);
-			binding.contextUsed = undefined;
-			binding.inferences = 0;
-			binding.turnCompletion = new Promise<void>((resolve) => {
-				completeTurn = resolve;
-			});
-			if (options.signal) {
-				const promptBinding = binding;
-				onTurnAbort = () => abortTurn(promptBinding);
-				options.signal.addEventListener("abort", onTurnAbort, { once: true });
-				if (options.signal.aborted) onTurnAbort();
-			}
-			const response = await binding.connection.prompt(
-				{ sessionId: binding.session.sessionId, prompt: parts.prompt },
-				options.signal,
-			);
-			if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
-			const activeWriter = binding.writer ?? writer;
-			if (binding.abortRequested) throw abortError();
-			const usage = usageFromPrompt(response, model);
-			this.metrics.record(response, usage);
-			// agy reports exhaustion as an ordinary reply; fail it before the turn is persisted.
-			const quota = usage.totalTokens === 0 || response.stopReason === "refusal"
-				? quotaExhaustion(activeWriter.message.content.map((block) => block.type === "text" ? block.text : "").join(""))
-				: undefined;
-			if (quota) {
-				throw new AntigravityAcpError("quota",
-					`Antigravity quota exceeded for ${binding.modelId}.${quota.resetAt ? ` Resets at ${quota.resetAt}.` : ""}`);
-			}
-			if (binding.contextUsed !== undefined) {
-				// Pi checks input + cacheRead for silent overflow, not totalTokens. For multiple inferences,
-				// only the latest context size is known, not its cache split; metrics above keep billed totals.
-				// agy adds cache reads to `used` twice; only a single inference's cache count is exact,
-				// so multiple inferences still use `used` as an upper bound.
-				activeWriter.message.usage = {
-					...usage,
-					input: binding.inferences > 1 ? binding.contextUsed : usage.input,
-					cacheRead: binding.inferences > 1 ? 0 : usage.cacheRead,
-					totalTokens: binding.inferences === 1 ? Math.max(0, binding.contextUsed - usage.cacheRead) : binding.contextUsed,
-				};
-			} else activeWriter.message.usage = usage;
-			activeWriter.message.rawStopReason = response.stopReason;
-			binding.messageCount = binding.pendingContextCount || parts.messageCount;
-			binding.historyFingerprint = binding.pendingContextFingerprint;
-			binding.expectedAssistantFingerprint = messageFingerprint(activeWriter.message);
-			this.persistBinding(binding);
-			switch (response.stopReason) {
-				case "cancelled":
-					throw abortError();
-				case "max_tokens":
-				case "max_turn_requests":
-					activeWriter.done("length");
-					break;
-				default:
-					activeWriter.done("stop");
-			}
-		} catch (error) {
-			if ((binding.permission || binding.pendingTools.size > 0) && (binding.writer ?? writer).finished) {
-				this.commitProgress(binding, (binding.writer ?? writer).message);
-			}
-			if (isAbort(error) || binding.abortRequested) abortTurn(binding);
-			// Evict dead/closing connections before writer.fail() wakes callers/retries,
-			// while keeping sessionStore intact so the retry can resume or rebuild cleanly.
-			if (isConnectionDead(binding.connection)) await this.dropBinding(key, binding);
-			binding.writer?.fail(error, isAbort(error));
-			throw error;
 		} finally {
-			if (onTurnAbort) options.signal?.removeEventListener("abort", onTurnAbort);
-			// ACP can time out before Pi's tool finishes; replay late results in a new prompt, not a dead continuation.
-			cancelPermission(binding);
-			cancelPiTools(binding, "Antigravity prompt ended before Pi returned the tool result");
-			completeTurn?.();
-			binding.turnCompletion = undefined;
-			binding.abortRequested = false;
-			binding.writer = undefined;
-			release();
-			if (this.queues.get(key) === queue) this.queues.delete(key);
-			if (!persistent) await this.dropBinding(key, binding);
+			this.releaseBusyKey(key);
 		}
 	}
 
@@ -736,6 +807,7 @@ export class AntigravityRuntime {
 			killTimer = setTimeout(() => {
 				if (binding.turnCompletion === completion) void binding.connection.close();
 			}, 1_500);
+			killTimer.unref?.();
 		};
 		if (signal.aborted) abort();
 		else signal.addEventListener("abort", abort, { once: true });
@@ -749,6 +821,7 @@ export class AntigravityRuntime {
 
 	private findContinuationKey(context: Context): string | undefined {
 		for (const binding of this.resolvedBindings) {
+			if (!binding.turnCompletion) continue;
 			if (binding.permission && findPermissionResult(context, binding.permission.id)) return binding.key;
 			if (
 				binding.pendingTools.size > 0 &&
@@ -776,10 +849,18 @@ export class AntigravityRuntime {
 			const existing = this.bindings.get(key);
 			if (!existing) break;
 			const resolved = await existing;
-			if (!isConnectionDead(resolved.connection)) return resolved;
+			if (!isConnectionDead(resolved.connection)) {
+				this.touchBinding(resolved);
+				return resolved;
+			}
 			await this.dropBinding(key, resolved, false);
 		}
-		const created = this.createBinding(key, model, acpModelId, apiKey, writer, tools ?? [], signal).catch((error) => {
+		let created!: Promise<Binding>;
+		created = (async () => {
+			await this.evictForCapacity();
+			this.assertActive();
+			return this.createBinding(key, model, acpModelId, apiKey, writer, tools ?? [], created, signal);
+		})().catch((error) => {
 			if (this.bindings.get(key) === created) this.bindings.delete(key);
 			throw error;
 		});
@@ -794,12 +875,14 @@ export class AntigravityRuntime {
 		apiKey: string | undefined,
 		writer: PiEventWriter,
 		tools: NonNullable<Context["tools"]>,
+		entryPromise: Promise<Binding>,
 		signal?: AbortSignal,
 	): Promise<Binding> {
 		const cwd = process.cwd();
 		let binding: Binding | undefined;
 		let bridge: PiMcpBridge | undefined;
 		const epoch = this.bindingEpoch;
+		const sessionEpoch = this.sessionEpoch(key);
 		const connection = this.createConnection({
 			cwd,
 			handlers: {
@@ -809,9 +892,9 @@ export class AntigravityRuntime {
 		});
 		try {
 			const initialize = await connection.initialize();
-			this.assertEpoch(epoch);
+			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
-			this.assertEpoch(epoch);
+			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const omittedTools = initialize.agentCapabilities?.mcpCapabilities?.http === true
 				? planToolProjection(tools)
 				: tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
@@ -849,7 +932,7 @@ export class AntigravityRuntime {
 				}
 			}
 			session ??= await connection.newSession(cwd, signal, mcpServers);
-			this.assertEpoch(epoch);
+			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const mode = this.permissionMode;
 			if (!supportsMode(session, mode)) {
 				if (piSessionId) this.sessionStore?.remove(piSessionId);
@@ -861,7 +944,7 @@ export class AntigravityRuntime {
 			}
 			const currentModel = sessionModels(session)?.currentModelId;
 			if (currentModel !== acpModelId) await connection.setModel(session.sessionId, acpModelId, signal);
-			this.assertEpoch(epoch);
+			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			if (mode !== this.permissionMode) throw new AntigravityAcpError("protocol", "Permission mode changed during session setup; retry the turn");
 			const createdBinding: Binding = {
 				key,
@@ -891,19 +974,21 @@ export class AntigravityRuntime {
 				abortRequested: false,
 				piSessionId,
 				restored,
+				lastUsedAt: Date.now(),
+				lastUsedSeq: ++this.usageSeq,
 			};
 			binding = createdBinding;
+			this.bindingPromises.set(createdBinding, entryPromise);
 			this.persistBinding(createdBinding);
 			this.resolvedBindings.add(createdBinding);
+			this.syncIdleCleanupTimer();
 			void connection.process.exited.then(() => {
 				cancelPermission(createdBinding);
 				cancelPiTools(createdBinding, "Antigravity process exited before Pi returned the tool result");
 				this.resolvedBindings.delete(createdBinding);
+				this.syncIdleCleanupTimer();
 				void bridge?.close().catch(() => undefined);
-				const current = this.bindings.get(key);
-				if (current) void current.then((value) => {
-					if (value === createdBinding && this.bindings.get(key) === current) this.bindings.delete(key);
-				}).catch(() => undefined);
+				if (this.bindings.get(key) === entryPromise) this.bindings.delete(key);
 			}).catch(() => undefined);
 			return createdBinding;
 		} catch (error) {
@@ -1004,10 +1089,11 @@ export class AntigravityRuntime {
 			return;
 		}
 		if (!binding.writer) return;
+		const hasBridge = Boolean(binding.bridge && !binding.bridge.empty);
 		for (const activity of mapSessionUpdate(notification)) {
 			if (activity.type === "text") binding.writer.text(activity.delta);
 			else if (activity.type === "thought") binding.writer.thinking(activity.delta);
-			else if (activity.type === "tool" || activity.type === "plan") binding.writer.thinking(activity.text);
+			else if (activity.type === "plan" || (activity.type === "tool" && !hasBridge)) binding.writer.thinking(activity.text);
 			else if (activity.type === "usage") {
 				binding.contextUsed = activity.used;
 				binding.inferences += 1;
@@ -1017,15 +1103,77 @@ export class AntigravityRuntime {
 	}
 
 	private async dropBinding(key: string, binding: Binding, removeSaved = false): Promise<void> {
+		this.resolvedBindings.delete(binding);
+		this.syncIdleCleanupTimer();
+		const entryPromise = this.bindingPromises.get(binding);
 		const current = this.bindings.get(key);
-		if (current && (await current.catch(() => undefined)) === binding && this.bindings.get(key) === current) {
+		if (current && (entryPromise ? entryPromise === current : (await current.catch(() => undefined)) === binding && this.bindings.get(key) === current)) {
 			if (removeSaved && binding.piSessionId) this.sessionStore?.remove(binding.piSessionId);
 			this.bindings.delete(key);
 		}
-		this.resolvedBindings.delete(binding);
 		cancelPermission(binding);
 		cancelPiTools(binding, "Antigravity session closed before Pi returned the tool result");
 		await Promise.allSettled([binding.connection.close(), binding.bridge?.close() ?? Promise.resolve()]);
+	}
+
+	private touchBinding(binding: Binding): void {
+		binding.lastUsedAt = Date.now();
+		binding.lastUsedSeq = ++this.usageSeq;
+	}
+
+	private isBindingIdle(binding: Binding): boolean {
+		return (
+			binding.turnCompletion === undefined &&
+			binding.permission === undefined &&
+			binding.pendingTools.size === 0 &&
+			!this.queues.has(binding.key) &&
+			(this.busyKeys.get(binding.key) ?? 0) === 0
+		);
+	}
+
+	private syncIdleCleanupTimer(forceStop = false): void {
+		if (forceStop || this.disposed || this.resolvedBindings.size === 0) {
+			if (this.idleCleanupTimer) {
+				clearInterval(this.idleCleanupTimer);
+				this.idleCleanupTimer = undefined;
+			}
+			return;
+		}
+		if (this.idleCleanupTimer) return;
+		const intervalMs = Math.max(10, Math.min(Math.floor(this.idleMs / 2), 30_000));
+		this.idleCleanupTimer = setInterval(() => {
+			void this.evictExpiredBindings();
+		}, intervalMs);
+		this.idleCleanupTimer.unref();
+	}
+
+	private runEviction(task: () => Promise<void>): Promise<void> {
+		const next = this.evictionQueue.then(task, task);
+		this.evictionQueue = next.catch(() => undefined);
+		return next;
+	}
+
+	private evictExpiredBindings(): Promise<void> {
+		return this.runEviction(async () => {
+			if (this.disposed) return;
+			const now = Date.now();
+			const expired = [...this.resolvedBindings].filter(
+				(binding) => this.isBindingIdle(binding) && now - binding.lastUsedAt >= this.idleMs,
+			);
+			await Promise.all(expired.map((binding) => this.dropBinding(binding.key, binding, false)));
+		});
+	}
+
+	private evictForCapacity(): Promise<void> {
+		return this.runEviction(async () => {
+			if (this.disposed || this.bindings.size <= this.maxBindings) return;
+			const excess = this.bindings.size - this.maxBindings;
+			const candidates = [...this.resolvedBindings]
+				.filter((binding) => this.isBindingIdle(binding))
+				.sort((left, right) => left.lastUsedAt - right.lastUsedAt || left.lastUsedSeq - right.lastUsedSeq)
+				.slice(0, excess);
+			await Promise.all(candidates.map((binding) => this.dropBinding(binding.key, binding, false)));
+		});
 	}
 
 	private confirmedMode(binding: Binding): string | undefined {
@@ -1054,6 +1202,31 @@ export class AntigravityRuntime {
 		return connection;
 	}
 
+	private sessionEpoch(key: string): number {
+		return this.sessionEpochs.get(key) ?? 0;
+	}
+
+	private bumpSessionEpoch(key: string): void {
+		this.sessionEpochs.set(key, this.sessionEpoch(key) + 1);
+	}
+
+	private retainBusyKey(key: string): void {
+		this.busyKeys.set(key, (this.busyKeys.get(key) ?? 0) + 1);
+	}
+
+	private releaseBusyKey(key: string): void {
+		const count = this.busyKeys.get(key) ?? 0;
+		if (count <= 1) this.busyKeys.delete(key);
+		else this.busyKeys.set(key, count - 1);
+	}
+
+	private assertSessionEpoch(key: string, epoch: number, sessionEpoch: number): void {
+		this.assertEpoch(epoch);
+		if (this.sessionEpoch(key) !== sessionEpoch) {
+			throw new AntigravityAcpError("process_exit", "Antigravity session was closed during setup");
+		}
+	}
+
 	private assertEpoch(epoch: number): void {
 		this.assertActive();
 		if (epoch !== this.bindingEpoch) throw new AntigravityAcpError("process_exit", "Antigravity session was closed during setup");
@@ -1062,6 +1235,12 @@ export class AntigravityRuntime {
 	private assertActive(): void {
 		if (this.disposed) throw new AntigravityAcpError("process_exit", "Antigravity ACP runtime is closed");
 	}
+}
+
+function positiveInt(value: number | string | undefined, fallback: number, minimum = 1): number {
+	if (value === undefined || value === "") return fallback;
+	const parsed = typeof value === "number" ? value : Number(value);
+	return Number.isFinite(parsed) && parsed >= minimum ? Math.floor(parsed) : fallback;
 }
 
 async function authenticateForCredential(
