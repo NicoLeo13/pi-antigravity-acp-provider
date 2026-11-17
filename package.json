@@ -1,6 +1,6 @@
 {
   "name": "pi-antigravity-acp-provider",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "First-class Google Antigravity ACP provider for Pi",
   "type": "module",
   "license": "MIT",
