@@ -1,4 +1,5 @@
 import { isContextOverflow, isRetryableAssistantError, normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
+import { retryAssistantCall } from "@earendil-works/pi-ai/utils/retry";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -699,5 +700,197 @@ describe("throwaway conversations", () => {
 		await runtime.quota(undefined);
 		await connections[0]!.process.exited;
 		expect(store.files()).toEqual([...userFiles, "fake-session.db", "fake-session.db-shm", "fake-session.db-wal", "fake-session.meta"].sort());
+	});
+});
+
+describe("closed connection eviction and retry recovery", () => {
+	it("evicts a timed-out binding even if process.alive lingers after close() and recovers on Pi retry", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-retry-eviction-"));
+		roots.push(root);
+		const log = path.join(root, "calls.jsonl");
+		fs.writeFileSync(log, "");
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const connections: AntigravityAcpConnection[] = [];
+		const realCloses: Array<() => Promise<void>> = [];
+		const runtime = new AntigravityRuntime((options) => {
+			const connection = new AntigravityAcpConnection({
+				...options,
+				command: process.execPath,
+				args: [fakeAgent],
+				env: { ...process.env, FAKE_AGENT_LOG_FILE: log },
+				promptIdleTimeoutMs: 60,
+			});
+			const realClose = connection.process.close.bind(connection.process);
+			realCloses.push(realClose);
+			// Simulate close() returning while the OS child still reports alive === true
+			// (e.g. slow teardown or unkillable child grace period).
+			if (connections.length === 0) {
+				connection.process.close = async () => undefined;
+			}
+			connections.push(connection);
+			return connection;
+		}, "yolo", store);
+		runtimes.push(runtime);
+
+		try {
+			const first = await turn(runtime, [user("hello")], "retry-recovery");
+			expect(first.stopReason).toBe("stop");
+			expect(store.get("retry-recovery")).toBeDefined();
+
+			let attempt = 0;
+			const scheduled: string[] = [];
+			const retried = await retryAssistantCall(
+				async () => {
+					attempt += 1;
+					const text = attempt === 1 ? "hang" : "hello again";
+					return drain(runtime.stream(model, {
+						messages: [user("hello"), first, user(text, 2)],
+					}, { sessionId: "retry-recovery", apiKey: "test-key" }));
+				},
+				{ enabled: true, maxRetries: 1, baseDelayMs: 10 },
+				undefined,
+				{ onRetryScheduled: (_attempt, _max, _delay, errorMessage) => { scheduled.push(errorMessage); } },
+			);
+
+			expect(attempt).toBe(2);
+			expect(scheduled).toEqual([expect.stringContaining("timed out")]);
+			expect(retried.stopReason).toBe("stop");
+			expect(retried.content).toEqual([
+				{ type: "thinking", thinking: "Checking" },
+				{ type: "text", text: "Hello" },
+			]);
+			expect(connections).toHaveLength(2);
+			expect((await runtime.snapshot()).processes[0]?.restored).toBe(true);
+		} finally {
+			await Promise.allSettled(realCloses.map((close) => close()));
+		}
+	});
+
+	it("evicts a closed binding before the child finishes exiting when the next turn arrives", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-closed-between-turns-"));
+		roots.push(root);
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const connections: AntigravityAcpConnection[] = [];
+		const realCloses: Array<() => Promise<void>> = [];
+		const runtime = new AntigravityRuntime((options) => {
+			const connection = new AntigravityAcpConnection({
+				...options,
+				command: process.execPath,
+				args: [fakeAgent],
+			});
+			const realClose = connection.process.close.bind(connection.process);
+			realCloses.push(realClose);
+			if (connections.length === 0) {
+				connection.process.close = async () => undefined;
+			}
+			connections.push(connection);
+			return connection;
+		}, "yolo", store);
+		runtimes.push(runtime);
+
+		try {
+			const first = await turn(runtime, [user("hello")], "between-turns");
+			expect(first.stopReason).toBe("stop");
+			await connections[0]!.close();
+			expect(connections[0]!.closed).toBe(true);
+			expect(connections[0]!.process.alive).toBe(true);
+
+			const second = await turn(runtime, [user("hello"), first, user("next", 2)], "between-turns");
+			expect(second.stopReason).toBe("stop");
+			expect(connections).toHaveLength(2);
+			expect((await runtime.snapshot()).processes[0]?.restored).toBe(true);
+			expect(store.get("between-turns")).toBeDefined();
+		} finally {
+			await Promise.allSettled(realCloses.map((close) => close()));
+		}
+	});
+
+	it("completes binding eviction before failing the stream when process teardown is slow", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-slow-teardown-"));
+		roots.push(root);
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const connections: AntigravityAcpConnection[] = [];
+		const runtime = new AntigravityRuntime((options) => {
+			const connection = new AntigravityAcpConnection({
+				...options,
+				command: process.execPath,
+				args: [fakeAgent],
+				promptIdleTimeoutMs: 60,
+			});
+			const realClose = connection.process.close.bind(connection.process);
+			connection.process.close = async () => {
+				await new Promise((resolve) => setTimeout(resolve, 150));
+				await realClose();
+			};
+			connections.push(connection);
+			return connection;
+		}, "yolo", store);
+		runtimes.push(runtime);
+
+		const failed = await turn(runtime, [user("hang")], "slow-teardown");
+		expect(failed.stopReason).toBe("error");
+		expect(failed.errorMessage).toContain("timed out");
+		expect((await runtime.snapshot()).bindings).toBe(0);
+		expect(connections[0]?.process.alive).toBe(false);
+	});
+
+	it("commits consumed tool continuation context before awaiting prompt completion so retry does not resend external-delta or user prompt", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-tool-continuation-retry-"));
+		roots.push(root);
+		const log = path.join(root, "calls.jsonl");
+		fs.writeFileSync(log, "");
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({
+			...options,
+			command: process.execPath,
+			args: [fakeAgent],
+			env: { ...process.env, FAKE_AGENT_LOG_FILE: log },
+			promptIdleTimeoutMs: 80,
+		}), "yolo", store);
+		runtimes.push(runtime);
+
+		const initialContext = normalizeContext({
+			tools,
+			messages: [user("use bridge delayed")],
+		});
+		const first = await drain(runtime.stream(model, initialContext, { sessionId: "cont-retry", apiKey: "test-key" }));
+		expect(first.stopReason).toBe("toolUse");
+		const call = first.content.find((block) => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("missing tool call");
+
+		const contContext = normalizeContext({
+			messages: [
+				...initialContext.messages,
+				first,
+				{
+					role: "toolResult",
+					toolCallId: call.id,
+					toolName: call.name,
+					content: [{ type: "text", text: "bridge-output-payload" }],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		});
+
+		// Continuation delivers the tool result to ACP, then stalls during "bridge delayed" (500ms > 80ms watchdog).
+		const stalled = await drain(runtime.stream(model, contContext, { sessionId: "cont-retry", apiKey: "test-key" }));
+		expect(stalled.stopReason).toBe("error");
+		expect(stalled.errorMessage).toContain("timed out");
+		expect(store.get("cont-retry")?.messageCount).toBe(contContext.messages.length);
+
+		// Retry on the restored session must send only WARM_CONTINUATION without external-delta or duplicate user prompt.
+		const retried = await drain(runtime.stream(model, contContext, { sessionId: "cont-retry", apiKey: "test-key" }));
+		expect(retried.stopReason).toBe("stop");
+		const prompts = fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
+			.map((line) => JSON.parse(line) as { method: string; prompt?: Array<{ type: string; text?: string }> })
+			.filter((entry) => entry.method === "session/prompt");
+		expect(prompts).toHaveLength(2);
+		expect(prompts[1]?.prompt).toEqual([
+			{
+				type: "text",
+				text: "Continue the current Pi user request already given in this session. Incorporate the latest tool results without repeating completed tool actions.",
+			},
+		]);
 	});
 });

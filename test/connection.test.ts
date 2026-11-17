@@ -25,6 +25,51 @@ describe("AntigravityAcpConnection", () => {
 		}
 	});
 
+	it("marks the connection closed immediately upon close() even while the child process is alive", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent],
+		});
+		const realClose = connection.process.close.bind(connection.process);
+		let releaseClose!: () => void;
+		const closeGate = new Promise<void>((resolve) => {
+			releaseClose = resolve;
+		});
+		connection.process.close = async () => {
+			await closeGate;
+			await realClose();
+		};
+		try {
+			await connection.initialize();
+			expect(connection.closed).toBe(false);
+			const closing = connection.close();
+			expect(connection.closed).toBe(true);
+			expect(connection.process.alive).toBe(true);
+			releaseClose();
+			await closing;
+			expect(connection.process.alive).toBe(false);
+		} finally {
+			releaseClose?.();
+			await realClose();
+		}
+	});
+
+	it("marks the connection closed on protocol error", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent, "malformed-output"],
+			initializeTimeoutMs: 5_000,
+		});
+		try {
+			await expect(connection.initialize()).rejects.toThrow("malformed JSON");
+			expect(connection.closed).toBe(true);
+		} finally {
+			await connection.close();
+		}
+	});
+
 	it("rejects malformed output without an unhandled SDK receive rejection", async () => {
 		const connection = new AntigravityAcpConnection({
 			cwd: path.dirname(fakeAgent),
@@ -208,6 +253,34 @@ describe("AntigravityAcpConnection", () => {
 			expect(connection.process.alive).toBe(true);
 			release(); release(); await rejection;
 		} finally { await connection.close(); }
+	});
+
+	it("surfaces redacted stderrTail on prompt watchdog and operation timeouts", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent],
+			promptIdleTimeoutMs: 40,
+		});
+		try {
+			await connection.initialize();
+			const session = await connection.newSession(process.cwd());
+			connection.process.child.stderr.push(
+				"WARNING: System step error (HTTP 502): The model is currently unreachable. api_key=AIza1234567890abcdefghijkl\n",
+			);
+			const error = await connection.prompt({
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "hang" }],
+			}).catch((cause: unknown) => cause);
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toContain(
+				"Antigravity ACP session/prompt timed out: no progress for 40ms: WARNING: System step error (HTTP 502): The model is currently unreachable.",
+			);
+			expect((error as Error).message).toContain("<redacted>");
+			expect((error as Error).message).not.toContain("AIza1234567890abcdefghijkl");
+		} finally {
+			await connection.close();
+		}
 	});
 
 	describe("when agy silently retries 429 RESOURCE_EXHAUSTED", () => {

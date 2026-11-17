@@ -96,7 +96,7 @@ export class AntigravityAcpConnection {
 			onCompatibilityNoise: () => this.process.recordCompatibilityNoise(),
 			onProtocolError: (error) => {
 				rejectProtocolFailure(error);
-				void this.process.close();
+				void this.close().catch(() => undefined);
 			},
 			closeOnProtocolError: true,
 		});
@@ -330,8 +330,12 @@ export class AntigravityAcpConnection {
 		await this.connection.agent.notify(methods.agent.session.cancel, { sessionId });
 	}
 
+	get closed(): boolean {
+		return this.closePromise !== undefined || this.connection.signal.aborted || !this.process.alive;
+	}
+
 	async close(): Promise<void> {
-		this.connection.close();
+		(this.connection as ClientConnection | undefined)?.close();
 		this.closePromise ??= this.process.close();
 		await this.closePromise;
 	}
@@ -410,8 +414,9 @@ export class AntigravityAcpConnection {
 		let rejectStall!: (error: Error) => void;
 		const stalled = new Promise<never>((_resolve, reject) => { rejectStall = reject; });
 		const watchdog = new PromptWatchdog(this.promptIdleTimeoutMs, this.promptWorkIdleTimeoutMs, (busy, ms) => {
+			const detail = this.process.stderrTail.trim() ? `: ${this.process.stderrTail.trim()}` : "";
 			rejectStall(new AntigravityAcpError("timeout",
-				`Antigravity ACP session/prompt timed out: no ${busy ? "tool/permission " : ""}progress for ${ms}ms`));
+				`Antigravity ACP session/prompt timed out: no ${busy ? "tool/permission " : ""}progress for ${ms}ms${detail}`));
 			void this.close().catch(() => undefined);
 		});
 		// agy retries a 429 without updating or answering; fail the prompt before the idle watchdog.
@@ -446,8 +451,9 @@ export class AntigravityAcpConnection {
 				this.processFailure,
 				new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
+						const detail = this.process.stderrTail.trim() ? `: ${this.process.stderrTail.trim()}` : "";
 						void this.close();
-						reject(new AntigravityAcpError("timeout", `Antigravity ACP ${phase} timed out after ${timeoutMs}ms`));
+						reject(new AntigravityAcpError("timeout", `Antigravity ACP ${phase} timed out after ${timeoutMs}ms${detail}`));
 					}, timeoutMs);
 					timer.unref?.();
 				}),
