@@ -220,21 +220,18 @@ Check Pi conformance behavior for `length`; a truncated generation is a complete
 
 ### Usage
 
-Parse current extension shape with strict numeric validation:
+`usageFromPrompt()` reconciles standard `PromptResponse.usage` input/output/cache/thought counters against its aggregate `totalTokens`. ACP 1.5.0 reports net input (excluding cached tokens) and output inclusive of thoughts; legacy formats can report gross input and output exclusive of thoughts. Quota token metadata is a fallback when standard input/output counters are absent. Reject negative, non-finite, fractional, or unsafe integer counts; do not estimate tokens from text length.
 
-```text
-input  = quota.token_count.input_tokens   ?? 0
-output = quota.token_count.output_tokens  ?? 0
-cacheRead = 0
-cacheWrite = 0
-totalTokens = input + output
-reasoning = undefined (unless upstream exposes separate count)
-cost totals = 0
-```
+Aggregate inference activity is **not** current context occupancy. Runtime metrics and catalog-based cost estimates retain the aggregate counters. Pi uses the persisted message's `usage.totalTokens` to budget subsequent requests, so the runtime maps context separately:
 
-Reject negative, non-finite, fractional, or unsafe integer values into diagnostics and use zero for that field. Do not derive tokens from text length. Keep `model_usage` as bounded diagnostics and use it to set `responseModel` when unambiguous. Auto-routing may involve more than one model, in which case retain all and do not pretend one id produced everything.
+- With no `usage_update`, retain the reconciled prompt usage.
+- With multiple inference updates, use the latest `usage_update.used` as context size. Set message `input` to that size and `cacheRead` to zero so Pi's silent-overflow check does not use aggregate input/cache counts. Keep aggregate output, reasoning and cost.
+- With one inference, retain the prompt's input/cache split and use `usage_update.used` as context size. Correct legacy duplicate cache reads **only when** `used === reconciledPromptTotal + cacheRead`, using the reconciled prompt total instead. ACP 1.5.0's already-correct `used` must not have cache reads subtracted again.
+- Zero-valued setup updates do not count as inferences. Context tracking resets before each ACP prompt.
 
-Dollar cost remains zero because CLI subscription/API-key routing and model-specific billing cannot reliably be inferred from ACP metadata. README should label zero as “not reported,” not “free.”
+Legacy multi-inference updates can still overestimate context because their final-inference cache split is unavailable; never subtract a whole turn's aggregate cache reads from the last inference. Regression fixtures replay the ACP 1.4.3 and 1.5.0 counters reported in [issue #80](https://github.com/zacbemis/pi-antigravity-acp-provider/issues/80#issuecomment-6936679859), checking Pi's actual estimator/output clamp and aggregate accounting. This fixture coverage is not a new live-server verification.
+
+Dollar costs are reference estimates from catalog rates, not reported Antigravity subscription charges. Unknown model families retain zero rates.
 
 ## 7. Pi event writer state machine
 

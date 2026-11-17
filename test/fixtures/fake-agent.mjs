@@ -406,6 +406,16 @@ for await (const line of rl) {
 					cachedReadTokens, outputTokens: 4000, totalTokens: inputs.reduce((sum, context) => sum + context, 0) } } });
 			continue;
 		}
+		if (text.startsWith("usage capture ")) {
+			// Raw counters reported in issue #80, not inferred from the provider's mapping.
+			const captures = JSON.parse(fs.readFileSync(new URL("./usage-captures.json", import.meta.url), "utf8"));
+			const capture = captures.find((entry) => text === `usage capture ${entry.name}`);
+			usageUpdate(0);
+			for (const used of capture.updates) usageUpdate(used);
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn", usage: capture.usage } });
+			continue;
+		}
 		if (text === "usage overflow error") {
 			usageUpdate(270000);
 			send({ jsonrpc: "2.0", id, error: { code: -32603,
@@ -419,8 +429,8 @@ for await (const line of rl) {
 				usage: { inputTokens: 1000, cachedReadTokens: 400, outputTokens: 150, thoughtTokens: 50, totalTokens: 1200 } } });
 			continue;
 		}
-		if (text === "usage single net") {
-			usageUpdate(1200);
+		if (text === "usage single net" || text === "usage single net drift") {
+			usageUpdate(text.endsWith("drift") ? 1300 : 1200);
 			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn",
 				usage: { inputTokens: 600, cachedReadTokens: 400, outputTokens: 200, thoughtTokens: 50, totalTokens: 1200 } } });

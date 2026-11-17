@@ -1,4 +1,6 @@
 import { isContextOverflow, isRetryableAssistantError, normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { retryAssistantCall } from "@earendil-works/pi-ai/utils/retry";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -110,16 +112,18 @@ describe("permission policy and lifecycle", () => {
 
 describe("context size from usage_update", () => {
 	it.each([
-		["usage multi", false, 1076000, 0],
-		["usage multi cached", false, 356000, 720000],
-		["usage multi cached boundary", false, 1086000, 720000],
-		["usage multi cached overflow", true, 1186000, 720000],
-	] as const)("detects overflow from the latest context, not billed tokens: %s", async (prompt, overflow, input, cacheRead) => {
+		["usage multi", false, 1076000, 0, 8192],
+		["usage multi cached", false, 356000, 720000, 8192],
+		["usage multi cached boundary", false, 1086000, 720000, 1],
+		["usage multi cached overflow", true, 1186000, 720000, 1],
+	] as const)("detects overflow from the latest context, not billed tokens: %s", async (prompt, overflow, input, cacheRead, budget) => {
 		const { runtime } = setup();
 		const message = await turn(runtime, [user(prompt)]);
 		expect(message.stopReason).toBe("stop");
 		expect(isContextOverflow(message, model.contextWindow)).toBe(overflow);
 		expect(message.usage.input + message.usage.cacheRead).toBeLessThanOrEqual(message.usage.totalTokens);
+		expect(estimateContextTokens([message]).usageTokens).toBe(message.usage.totalTokens);
+		expect(clampMaxTokensToContext(model, normalizeContext({ messages: [message] }), model.maxTokens)).toBe(budget);
 		expect((await runtime.snapshot()).metrics.totals).toMatchObject({ turns: 1, input, cacheRead, output: 4000 });
 	});
 
@@ -151,6 +155,62 @@ describe("context size from usage_update", () => {
 		expect(first.usage).toMatchObject({ input: 600, cacheRead: 400, totalTokens: 1200 });
 		const second = await turn(runtime, [user("usage single"), first, user("usage single", 3)]);
 		expect(second.usage).toMatchObject({ input: 600, cacheRead: 400, totalTokens: 1200 });
+	});
+
+	it.each([
+		["usage single net", 1200],
+		["usage single net drift", 1300],
+	] as const)("does not subtract cache reads without evidence of double-counting: %s", async (prompt, expectedContext) => {
+		const { runtime } = setup();
+		const message = await turn(runtime, [user(prompt)]);
+		expect(message.stopReason).toBe("stop");
+		expect(message.usage).toMatchObject({ input: 600, cacheRead: 400, output: 200, totalTokens: expectedContext });
+	});
+
+	// Captures: https://github.com/zacbemis/pi-antigravity-acp-provider/issues/80#issuecomment-6936679859
+	it.each([
+		["1.5.0", [25814, 26766, 26947],
+			[{ input: 25400, output: 639, reasoning: 516, cacheRead: 13635 },
+				{ input: 7301, output: 457, reasoning: 264, cacheRead: 71480 },
+				{ input: 2307, output: 98, reasoning: 93, cacheRead: 24542 }]],
+		["1.4.3", [46697, 48600, 25630],
+			[{ input: 28360, output: 1158, reasoning: 818, cacheRead: 57059 },
+				{ input: 7185, output: 446, reasoning: 243, cacheRead: 68159 },
+				{ input: 2280, output: 55, reasoning: 50, cacheRead: 23295 }]],
+	] as const)("replays ACP %s captures across three turns without corrupting Pi's budget or billed cost", async (version, contexts, billed) => {
+		const { runtime } = setup();
+		const pricedModel = { ...model, cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 } };
+		const messages: Context["messages"] = [];
+		for (const [index, name] of ["warm cache", "multi-step", "single inference"].entries()) {
+			messages.push(user(`usage capture ${version} ${name}`, Date.now()));
+			const message = await drain(runtime.stream(pricedModel, { messages }, { sessionId: "captured-usage", apiKey: "test-key" }));
+			expect(message.stopReason).toBe("stop");
+			const context = contexts[index]!;
+			const counters = billed[index]!;
+			expect(message.usage.totalTokens).toBe(context);
+			expect(message.usage.output).toBe(counters.output);
+			expect(message.usage.reasoning).toBe(counters.reasoning);
+			if (index === 2) {
+				expect(message.usage).toMatchObject(counters);
+			} else {
+				// The final inference's cache split is unavailable; old ACP's used is an upper bound.
+				expect(message.usage).toMatchObject({ input: context, cacheRead: 0 });
+			}
+			expect(isContextOverflow(message, model.contextWindow)).toBe(false);
+			expect(message.usage.cost.input).toBeCloseTo(counters.input / 1_000_000, 10);
+			expect(message.usage.cost.output).toBeCloseTo(counters.output * 2 / 1_000_000, 10);
+			expect(message.usage.cost.cacheRead).toBeCloseTo(counters.cacheRead * 0.1 / 1_000_000, 10);
+			messages.push(message);
+			expect(estimateContextTokens(messages).usageTokens).toBe(context);
+			// Exercise Pi's actual next-request clamp, including after a model/provider switch.
+			const nextModel = { ...model, contextWindow: context + 4096 + 1000 };
+			expect(clampMaxTokensToContext(nextModel, normalizeContext({ messages }), model.maxTokens)).toBe(1000);
+		}
+		const totals = (await runtime.snapshot()).metrics.totals;
+		expect(totals.turns).toBe(3);
+		for (const key of ["input", "output", "reasoning", "cacheRead"] as const) {
+			expect(totals[key]).toBe(billed.reduce((sum, counters) => sum + counters[key], 0));
+		}
 	});
 
 	it("keeps the prompt response usage when the agent sends no usage_update", async () => {

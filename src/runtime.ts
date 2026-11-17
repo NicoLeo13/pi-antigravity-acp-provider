@@ -748,13 +748,17 @@ export class AntigravityRuntime {
 				if (binding.contextUsed !== undefined) {
 					// Pi checks input + cacheRead for silent overflow, not totalTokens. For multiple inferences,
 					// only the latest context size is known, not its cache split; metrics above keep billed totals.
-					// agy adds cache reads to `used` twice; only a single inference's cache count is exact,
-					// so multiple inferences still use `used` as an upper bound.
+					// Legacy agy can count cache reads twice in `used`; ACP 1.5.0 does not. Correct only
+					// a single inference whose reconciled prompt total proves that exact discrepancy.
+					// Never subtract aggregate cache reads from a multi-inference context update.
+					const contextUsed = binding.inferences === 1 && binding.contextUsed === usage.totalTokens + usage.cacheRead
+						? usage.totalTokens
+						: binding.contextUsed;
 					activeWriter.message.usage = {
 						...usage,
 						input: binding.inferences > 1 ? binding.contextUsed : usage.input,
 						cacheRead: binding.inferences > 1 ? 0 : usage.cacheRead,
-						totalTokens: binding.inferences === 1 ? Math.max(0, binding.contextUsed - usage.cacheRead) : binding.contextUsed,
+						totalTokens: contextUsed,
 					};
 				} else activeWriter.message.usage = usage;
 				activeWriter.message.rawStopReason = response.stopReason;

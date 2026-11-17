@@ -1,0 +1,32 @@
+[
+  {
+    "name": "1.5.0 warm cache",
+    "updates": [13860, 25814],
+    "usage": { "totalTokens": 39674, "inputTokens": 25400, "outputTokens": 639, "thoughtTokens": 516, "cachedReadTokens": 13635, "cachedWriteTokens": 0 }
+  },
+  {
+    "name": "1.5.0 multi-step",
+    "updates": [26080, 26392, 26766],
+    "usage": { "totalTokens": 79238, "inputTokens": 7301, "outputTokens": 457, "thoughtTokens": 264, "cachedReadTokens": 71480, "cachedWriteTokens": 0 }
+  },
+  {
+    "name": "1.5.0 single inference",
+    "updates": [26947],
+    "usage": { "totalTokens": 26947, "inputTokens": 2307, "outputTokens": 98, "thoughtTokens": 93, "cachedReadTokens": 24542, "cachedWriteTokens": 0 }
+  },
+  {
+    "name": "1.4.3 warm cache",
+    "updates": [13751, 37315, 45873, 46697],
+    "usage": { "totalTokens": 86577, "inputTokens": 85419, "outputTokens": 340, "thoughtTokens": 818, "cachedReadTokens": 57059, "cachedWriteTokens": 0 }
+  },
+  {
+    "name": "1.4.3 multi-step",
+    "updates": [47306, 48043, 48600],
+    "usage": { "totalTokens": 75790, "inputTokens": 75344, "outputTokens": 203, "thoughtTokens": 243, "cachedReadTokens": 68159, "cachedWriteTokens": 0 }
+  },
+  {
+    "name": "1.4.3 single inference",
+    "updates": [48925],
+    "usage": { "totalTokens": 25630, "inputTokens": 25575, "outputTokens": 5, "thoughtTokens": 50, "cachedReadTokens": 23295, "cachedWriteTokens": 0 }
+  }
+]
