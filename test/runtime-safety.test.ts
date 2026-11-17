@@ -655,10 +655,17 @@ describe("tool projection diagnostics", () => {
 		expect(JSON.stringify(prompts[1]?.prompt)).toContain(`tool call echo id=${call.id}`);
 	});
 
-	it("projects up to 64 tools, excludes the permission broker and fingerprints descriptions/omissions", () => {
+	it("keeps tools beyond 64, excludes the permission broker and fingerprints descriptions/omissions", () => {
 		const active = Array.from({ length: 67 }, (_, i) => ({ name: `t${i}`, description: "tool", parameters: Type.Object({}) }));
 		const bridge = new PiMcpBridge({ tools: [...active, { name: PERMISSION_TOOL_NAME, description: "broker", parameters: Type.Object({}) }], onCall: async () => ({ content: [] }) });
-		expect(bridge.omissions.map((entry) => entry.name)).toEqual(["t64", "t65", "t66"]);
+		expect(bridge.omissions).toEqual([]);
+		expect(bridge.fingerprint).toBe(piToolFingerprint(active));
+		expect(piToolFingerprint(active)).not.toBe(piToolFingerprint(active.slice(0, 64)));
+		const invalid = new PiMcpBridge({ tools: [...active, active[0]!, { name: "bad", description: "bad", parameters: Type.String() }], onCall: async () => ({ content: [] }) });
+		expect(invalid.omissions).toEqual([
+			{ name: "t0", reason: "duplicate or invalid projected name" },
+			{ name: "bad", reason: expect.stringContaining("not_object") },
+		]);
 		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([{ ...tools[0]!, description: "changed" }]));
 		expect(piToolFingerprint(tools)).not.toBe(piToolFingerprint([...tools, { name: "bad", description: "bad", parameters: Type.String() }]));
 	});
