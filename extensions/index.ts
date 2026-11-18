@@ -17,11 +17,14 @@ import {
 	isPermissionMode,
 	isRuntimeUpdateMode,
 	isToolActivityMode,
+	isToolBridgeMode,
 	loadConfig,
 	permissionModeLabel,
+	saveIsolatedGeminiHome,
 	savePermissionMode,
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
+	saveToolBridgeMode,
 	type PermissionMode,
 } from "../src/config.js";
 import {
@@ -221,10 +224,51 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				ctx.ui.notify(`Antigravity tool activity: ${requested}`, "info");
 				return;
 			}
+			if (command === "tool-bridge" || command.startsWith("tool-bridge ")) {
+				let requested = command.slice("tool-bridge".length).trim().toLowerCase();
+				if (!requested) {
+					const choices = [
+						"ecosystem — bridge only ecosystem tools (engram, codegraph, subagents) and let Antigravity use its native core tools (default)",
+						"all — bridge all active Pi tools via MCP",
+					];
+					const selected = await ctx.ui.select("Antigravity Pi MCP tool bridge", choices);
+					if (!selected) return;
+					requested = selected.split(" ", 1)[0]!;
+				}
+				if (!isToolBridgeMode(requested)) {
+					ctx.ui.notify("Usage: /antigravity-acp tool-bridge [ecosystem|all]", "warning");
+					return;
+				}
+				runtime.setToolBridgeMode(requested);
+				saveToolBridgeMode(requested);
+				ctx.ui.notify(`Antigravity Pi MCP tool bridge: ${requested}`, "info");
+				return;
+			}
+			if (command === "isolated-home" || command.startsWith("isolated-home ")) {
+				let requested = command.slice("isolated-home".length).trim().toLowerCase();
+				if (!requested) {
+					const choices = [
+						"on — isolate GEMINI_HOME so ~/.gemini/GEMINI.md and skills are not loaded twice (default)",
+						"off — inherit ~/.gemini directly",
+					];
+					const selected = await ctx.ui.select("Antigravity isolated GEMINI_HOME", choices);
+					if (!selected) return;
+					requested = selected.split(" ", 1)[0]!;
+				}
+				if (requested !== "on" && requested !== "off") {
+					ctx.ui.notify("Usage: /antigravity-acp isolated-home [on|off]", "warning");
+					return;
+				}
+				const enabled = requested === "on";
+				runtime.setIsolatedGeminiHome(enabled);
+				saveIsolatedGeminiHome(enabled);
+				ctx.ui.notify(`Antigravity isolated GEMINI_HOME: ${requested} (applies to new connections)`, "info");
+				return;
+			}
 			const verbose = command === "doctor --verbose";
 			if (command !== "doctor" && command !== "status" && !verbose) {
 				ctx.ui.notify(
-					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity]",
+					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge|isolated-home]",
 					"warning",
 				);
 				return;
@@ -248,6 +292,8 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					`Credential storage (preflight): ${describeCredentialStorage()}`,
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
 					`Tool activity mode: ${snapshot.toolActivityMode}`,
+					`Tool bridge mode: ${snapshot.toolBridgeMode}`,
+					`Isolated GEMINI_HOME: ${snapshot.isolatedGeminiHome ? "on" : "off"}`,
 					`Active bindings: ${snapshot.bindings}`,
 					formatMetrics(snapshot.metrics),
 					...snapshot.processes.flatMap((item) => [

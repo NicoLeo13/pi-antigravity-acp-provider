@@ -34,11 +34,23 @@ describe("permission configuration", () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-config-"));
 		directories.push(directory);
 		const file = path.join(directory, "nested", "config.json");
-		expect(loadConfig(file)).toEqual({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig(file)).toEqual({
+			permissions: "yolo",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 		saveRuntimeUpdateMode("notify", file);
 		savePermissionMode("auto_edit", file);
 		saveToolActivityMode("off", file);
-		expect(loadConfig(file)).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "off" });
+		expect(loadConfig(file)).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "notify",
+			toolActivity: "off",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 	});
 
 	it("validates and persists toolActivity modes while defaulting invalid values to compact", () => {
@@ -83,9 +95,21 @@ describe("permission configuration", () => {
 		expect(resolveConfigRoot()).toBe(path.join(customAgentDir, "antigravity-acp-provider"));
 		expect(resolveConfigPath()).toBe(path.join(customAgentDir, "antigravity-acp-provider", "config.json"));
 
-		expect(loadConfig()).toEqual({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "yolo",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 		savePermissionMode("default");
-		expect(loadConfig()).toEqual({ permissions: "default", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "default",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 
 		const configFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(configFile)).toBe(true);
@@ -122,7 +146,13 @@ describe("permission configuration", () => {
 			JSON.stringify({ permissions: "auto_edit", runtimeUpdates: "manual" }),
 		);
 
-		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "manual", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "manual",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 		const targetFile = path.join(fakeHome, ".pi", "agent", "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
 	});
@@ -143,7 +173,13 @@ describe("permission configuration", () => {
 		directories.push(customAgentDir);
 		process.env.PI_CODING_AGENT_DIR = customAgentDir;
 
-		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "notify",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 		const targetFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
 		expect(fs.readFileSync(path.join(defaultAntigravityDir, "config.json"), "utf8")).toBe(
@@ -165,10 +201,22 @@ describe("permission configuration", () => {
 		fs.mkdirSync(path.dirname(target), { recursive: true });
 		const existing = JSON.stringify({ permissions: "default", runtimeUpdates: "manual" });
 		fs.writeFileSync(target, existing);
-		expect(loadConfig()).toEqual({ permissions: "default", runtimeUpdates: "manual", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "default",
+			runtimeUpdates: "manual",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 		expect(fs.readFileSync(target, "utf8")).toBe(existing);
 		fs.unlinkSync(target);
-		expect(loadConfig()).toEqual({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "yolo",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
+		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);
 	});

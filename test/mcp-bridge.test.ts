@@ -162,4 +162,34 @@ describe("PiMcpBridge", () => {
 			await bridge.close();
 		}
 	});
+
+	it("omits core Pi tools in ecosystem mode while retaining ecosystem tools", async () => {
+		const mixedTools = [
+			{ name: "read", description: "read", parameters: Type.Object({ path: Type.String() }) },
+			{ name: "bash", description: "bash", parameters: Type.Object({ command: Type.String() }) },
+			{ name: "edit", description: "edit", parameters: Type.Object({ path: Type.String() }) },
+			{ name: "mem_search", description: "search engram", parameters: Type.Object({ query: Type.String() }) },
+			{ name: "subagent_run", description: "run subagent", parameters: Type.Object({ task: Type.String() }) },
+		];
+		const bridge = new PiMcpBridge({
+			tools: mixedTools,
+			toolBridgeMode: "ecosystem",
+			onCall: async () => ({ content: [{ type: "text", text: "ok" }] }),
+		});
+		expect(bridge.omissions.map((item) => item.name)).toEqual(["read", "bash", "edit"]);
+		const descriptor = await bridge.start();
+		if (!descriptor || !("url" in descriptor)) throw new Error("bridge did not start");
+		const headers = Object.fromEntries(descriptor.headers.map((header) => [header.name, header.value]));
+		const client = new Client({ name: "eco-test", version: "1" }, { capabilities: {} });
+		const transport = new StreamableHTTPClientTransport(new URL(descriptor.url), { requestInit: { headers } });
+		try {
+			await client.connect(transport as Parameters<typeof client.connect>[0]);
+			const listed = await client.listTools();
+			expect(listed.tools.map((t) => t.name)).toEqual(["pi_mem_search", "pi_subagent_run"]);
+		} finally {
+			await transport.close();
+			await client.close();
+			await bridge.close();
+		}
+	});
 });
