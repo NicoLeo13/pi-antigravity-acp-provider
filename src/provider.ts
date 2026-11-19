@@ -10,22 +10,36 @@ import type {
 } from "@earendil-works/pi-ai";
 
 import { hasAntigravityAuth } from "./acp/antigravity.js";
-import { FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.js";
+import { fallbackModels, projectModels, PROVIDER_ID } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
 
 export interface AntigravityProviderBundle {
 	provider: Provider<"antigravity-acp">;
 	runtime: AntigravityRuntime;
+	providerId: string;
 }
 
-export function createAntigravityProvider(runtime = new AntigravityRuntime()): AntigravityProviderBundle {
-	let models = [...FALLBACK_MODELS];
+export interface AntigravityProviderOptions {
+	/** Pi provider id. Each account registers its own, so the model picker
+	 * shows one group per account and routing is the provider instance. */
+	providerId?: string;
+	/** Display name, which must identify the account in the picker. */
+	name?: string;
+}
+
+export function createAntigravityProvider(
+	runtime = new AntigravityRuntime(),
+	options: AntigravityProviderOptions = {},
+): AntigravityProviderBundle {
+	const providerId = options.providerId ?? PROVIDER_ID;
+	const providerName = options.name ?? "Google Antigravity (ACP)";
+	let models = [...fallbackModels(providerId)];
 	const provider: Provider<"antigravity-acp"> = {
-		id: PROVIDER_ID,
-		name: "Google Antigravity (ACP)",
+		id: providerId,
+		name: providerName,
 		auth: {
 			oauth: {
-				name: "Google Antigravity (ACP)",
+				name: providerName,
 				loginLabel: "Sign in with Google",
 				async login(interaction) {
 					interaction.notify({ type: "progress", message: "Starting Antigravity Google login…" });
@@ -114,7 +128,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 						: undefined;
 			let discovered;
 			try {
-				discovered = projectModels(await runtime.discoverModels(key, context.signal));
+				discovered = projectModels(await runtime.discoverModels(key, context.signal), providerId);
 			} catch {
 				// Startup refresh must not hide the conservative offline catalog when
 				// authentication is absent, expired, or temporarily unavailable.
@@ -134,7 +148,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 			return stream(runtime, model, context, options);
 		},
 	};
-	return { provider, runtime };
+	return { provider, runtime, providerId };
 }
 
 function stream(

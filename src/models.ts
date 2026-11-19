@@ -43,8 +43,17 @@ export function costRatesFor(modelId: string): Model<typeof API_ID>["cost"] {
 	return ZERO_COST;
 }
 
+/** Offline catalog for one provider id. Every account exposes the same model
+ * ids; only the owning provider differs, so Pi keys each account's models
+ * separately in the model picker. */
+export function fallbackModels(providerId: string = PROVIDER_ID): readonly Model<typeof API_ID>[] {
+	return providerId === PROVIDER_ID
+		? FALLBACK_CATALOG
+		: FALLBACK_CATALOG.map((model) => ({ ...model, provider: providerId }));
+}
+
 // Keep the broadly available Flash model first for offline/default selection.
-export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
+const FALLBACK_CATALOG: readonly Model<typeof API_ID>[] = [
 	reasoningModel("gemini-3.8-flash", "Gemini 3.8 Flash", {
 		low: "gemini-3.8-flash-low",
 		medium: "gemini-3.8-flash-medium",
@@ -77,10 +86,23 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 	}),
 ];
 
+/** The default provider's offline catalog. */
+export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = FALLBACK_CATALOG;
+
 /** Collapse Antigravity's effort-qualified ACP IDs into one Pi model. The
  * exact server IDs live in thinkingLevelMap, allowing Shift+Tab to select the
  * corresponding low/medium/high variant without cluttering /model. */
-export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API_ID>[] {
+export function projectModels(
+	models: readonly AcpModelInfo[],
+	providerId: string = PROVIDER_ID,
+): Model<typeof API_ID>[] {
+	const projected = projectCatalog(models);
+	return providerId === PROVIDER_ID
+		? projected
+		: projected.map((model) => ({ ...model, provider: providerId }));
+}
+
+function projectCatalog(models: readonly AcpModelInfo[]): Model<typeof API_ID>[] {
 	const safe = models.filter((candidate) => validModelId(candidate.modelId.trim()));
 	const groups = new Map<
 		string,
