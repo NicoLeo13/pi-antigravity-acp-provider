@@ -22,6 +22,7 @@ import {
 	clearAntigravityCredentials,
 	inspectAntigravityAuth,
 	removeConversation,
+	resolveAntigravityAcpDirectory,
 	type AntigravityAuthHealth,
 } from "./acp/antigravity.js";
 import { AntigravityAcpConnection, type AntigravityConnectionOptions } from "./acp/connection.js";
@@ -133,6 +134,9 @@ export interface AntigravityRuntimeOptions {
 	toolActivityMode?: ToolActivityMode;
 	toolBridgeMode?: ToolBridgeMode;
 	isolatedGeminiHome?: boolean;
+	/** Base environment for every agy process this runtime spawns and for local
+	 * credential inspection. A per-account home (`GEMINI_HOME`) belongs here. */
+	env?: NodeJS.ProcessEnv;
 }
 
 export interface RuntimeSnapshot {
@@ -189,6 +193,7 @@ export class AntigravityRuntime {
 	private toolActivityMode: ToolActivityMode;
 	private toolBridgeMode: ToolBridgeMode;
 	private isolatedGeminiHome: boolean;
+	private readonly baseEnv: NodeJS.ProcessEnv | undefined;
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
 	private quotaInFlight: { epoch: number; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
 
@@ -204,6 +209,7 @@ export class AntigravityRuntime {
 		this.toolActivityMode = options?.toolActivityMode ?? "compact";
 		this.toolBridgeMode = options?.toolBridgeMode ?? "all";
 		this.isolatedGeminiHome = options?.isolatedGeminiHome ?? false;
+		this.baseEnv = options?.env;
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
@@ -321,7 +327,7 @@ export class AntigravityRuntime {
 		} finally {
 			await connection.close();
 			// agy keeps no index and offers no delete RPC; remove the files only once the process is gone (close() can give up on a process that ignored SIGKILL).
-			if (sessionId && !connection.process.alive) removeConversation(sessionId);
+			if (sessionId && !connection.process.alive) removeConversation(sessionId, resolveAntigravityAcpDirectory(this.baseEnv ?? process.env));
 		}
 	}
 
@@ -335,7 +341,7 @@ export class AntigravityRuntime {
 		if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
 		this.assertEpoch(epoch);
 		const useManualOAuth = manualInteraction !== undefined && shouldUseHeadlessOAuth();
-		const relay = useManualOAuth ? new HeadlessOAuthRelay() : undefined;
+		const relay = useManualOAuth ? new HeadlessOAuthRelay(this.baseEnv ?? process.env) : undefined;
 		const cwd = process.cwd();
 		const connection = this.createConnection({
 			cwd,
@@ -416,7 +422,8 @@ export class AntigravityRuntime {
 	}
 
 	async authHealth(apiKey?: string): Promise<AntigravityAuthHealth & { networkValid?: boolean; error?: string }> {
-		const local = inspectAntigravityAuth();
+		const env = this.baseEnv ?? process.env;
+		const local = inspectAntigravityAuth(resolveAntigravityAcpDirectory(env), env);
 		try {
 			await this.discoverModels(apiKey ?? (hasUsableLocalAuth(local) ? MANAGED_AUTH_MARKER : undefined));
 			return { ...local, networkValid: true };
@@ -429,7 +436,7 @@ export class AntigravityRuntime {
 		await this.closeBindings();
 		this.quotaCache = undefined;
 		this.sessionStore?.clear();
-		clearAntigravityCredentials();
+		clearAntigravityCredentials(resolveAntigravityAcpDirectory(this.baseEnv ?? process.env));
 	}
 
 	setPermissionMode(mode: PermissionMode): Promise<void> {
@@ -1234,9 +1241,20 @@ export class AntigravityRuntime {
 
 	private createConnection(options: AntigravityConnectionOptions): AntigravityAcpConnection {
 		this.assertActive();
-		const connectionOptions = this.isolatedGeminiHome && this.ensureAgent
-			? { ...options, env: applyIsolatedGeminiEnvironment(options.env) }
+		// The account environment is the base for every spawn; a call may still
+		// layer its own values on top (the headless OAuth relay does exactly that).
+		const scoped: AntigravityConnectionOptions = this.baseEnv
+			? { ...options, env: options.env ? { ...this.baseEnv, ...options.env } : this.baseEnv }
 			: options;
+		// The isolated root is shared by every runtime in this process and its
+		// antigravity-acp symlink is repointed on demand, so an account that
+		// declares its own home must never use it: two accounts would flip one
+		// link and read each other's credentials. A declared home has no ambient
+		// GEMINI.md or skills to exclude either.
+		const isolate = this.isolatedGeminiHome && this.ensureAgent && !declaresHome(this.baseEnv);
+		const connectionOptions = isolate
+			? { ...scoped, env: applyIsolatedGeminiEnvironment(scoped.env) }
+			: scoped;
 		const connection = this.connectionFactory(connectionOptions);
 		this.activeConnections.add(connection);
 		void connection.process.exited.then(() => this.activeConnections.delete(connection)).catch(() => undefined);
@@ -1318,6 +1336,13 @@ function adaptPromptToCapabilities(parts: PromptParts, initialize: InitializeRes
 
 function hasUsableLocalAuth(health: AntigravityAuthHealth): boolean {
 	return health.status === "api-key-env" || health.status === "oauth-refreshable";
+}
+
+/** Whether a runtime environment names a home of its own, which makes the
+ * ambient isolation layer both unnecessary and unsafe to share. */
+function declaresHome(env: NodeJS.ProcessEnv | undefined): boolean {
+	if (!env) return false;
+	return Boolean(env.GEMINI_HOME?.trim() || env.HOME?.trim());
 }
 
 function supportsMode(session: SessionState, mode: PermissionMode): boolean {
