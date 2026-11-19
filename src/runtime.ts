@@ -421,9 +421,20 @@ export class AntigravityRuntime {
 		}
 	}
 
-	async authHealth(apiKey?: string): Promise<AntigravityAuthHealth & { networkValid?: boolean; error?: string }> {
+	/** Local credential presence in this runtime's own home. Provider auth
+	 * checks must use this instead of the ambient home, or a second account
+	 * would appear configured because the default account is logged in. */
+	hasLocalAuth(): boolean {
+		return hasUsableLocalAuth(this.inspectLocalAuth());
+	}
+
+	private inspectLocalAuth(): AntigravityAuthHealth {
 		const env = this.baseEnv ?? process.env;
-		const local = inspectAntigravityAuth(resolveAntigravityAcpDirectory(env), env);
+		return inspectAntigravityAuth(resolveAntigravityAcpDirectory(env), env);
+	}
+
+	async authHealth(apiKey?: string): Promise<AntigravityAuthHealth & { networkValid?: boolean; error?: string }> {
+		const local = this.inspectLocalAuth();
 		try {
 			await this.discoverModels(apiKey ?? (hasUsableLocalAuth(local) ? MANAGED_AUTH_MARKER : undefined));
 			return { ...local, networkValid: true };

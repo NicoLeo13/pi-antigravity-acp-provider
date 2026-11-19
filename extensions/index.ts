@@ -57,8 +57,8 @@ export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 
 export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: AntigravityConnectionFactory): void {
 	const shared = acquireSharedRuntime(connectionFactory);
-	const { runtime, provider } = shared;
-	pi.registerProvider(provider);
+	const runtime = shared.accounts[0]!.runtime;
+	for (const { provider } of shared.accounts) pi.registerProvider(provider);
 
 	// Other extensions ask for quota with `{ reply }` and get exactly one `{ ok, quota | error }`.
 	const unsubscribeQuota = pi.events.on(QUOTA_REQUEST_CHANNEL, (data) => {
@@ -84,7 +84,10 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 		parameters: Type.Object({ requestId: Type.String({ minLength: 1, maxLength: 128 }) }),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const request = runtime.getPermission(params.requestId);
+			// A request can come from any account's runtime; ids are unique.
+			const request = shared.accounts
+				.map(({ runtime: candidate }) => candidate.getPermission(params.requestId))
+				.find((candidate) => candidate !== undefined);
 			if (!request) throw new Error("This Antigravity permission request is missing, expired, or already used");
 			const labels = request.options.map(
 				(option, index) => `${index + 1}. ${option.label} [${option.kind.replaceAll("_", " ")}]`,
@@ -153,17 +156,29 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 			if (command === "logout" || command === "account" || command === "switch-account") {
 				await runtime.logout();
 				ctx.ui.notify(
-					"Local Antigravity credentials and saved ACP sessions were cleared. Run /logout for the old Pi marker, then /login to choose the next account.",
+					shared.accounts.length === 1
+						? "Local Antigravity credentials and saved ACP sessions were cleared. Run /logout for the old Pi marker, then /login to choose the next account."
+						: `Credentials and saved ACP sessions for ${shared.accounts[0]!.account.name} were cleared. Select that provider in /login to sign in again; other accounts are untouched.`,
 					"info",
 				);
 				return;
 			}
 			if (command === "quota") {
-				const quota = await runtime.quota(undefined).then(
-					formatQuota,
-					(error: unknown) => `Antigravity quota: unavailable (${errorMessage(error)})`,
+				// Quota is per runtime because credentials are per account. Keep
+				// the one-account output unchanged; label it only when it matters.
+				const reports = await Promise.all(shared.accounts.map(async ({ account, runtime: owner }) => {
+					const quota = await owner.quota(undefined).then(
+						formatQuota,
+						(error: unknown) => `Antigravity quota: unavailable (${errorMessage(error)})`,
+					);
+					return { name: account.name, text: [quota, formatMetrics((await owner.snapshot()).metrics)].join("\n") };
+				}));
+				ctx.ui.notify(
+					reports.length === 1
+						? reports[0]!.text
+						: reports.map((report) => `[${report.name}]\n${report.text}`).join("\n\n"),
+					"info",
 				);
-				ctx.ui.notify([quota, formatMetrics((await runtime.snapshot()).metrics)].join("\n"), "info");
 				return;
 			}
 			if (command === "qualify") {
@@ -190,7 +205,9 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					return;
 				}
 				const mode: PermissionMode = requested;
-				await runtime.setPermissionMode(mode);
+				// Permission mode is a single global config value, so every
+				// account's live bindings must follow it.
+				await Promise.all(shared.accounts.map(({ runtime: owner }) => owner.setPermissionMode(mode)));
 				savePermissionMode(mode);
 				ctx.ui.notify(
 					mode === "yolo"
@@ -313,6 +330,9 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (shared.problems.length) {
+			ctx.ui.notify(`Antigravity accounts: ${shared.problems.join("; ")}`, "warning");
+		}
 		if (loadConfig().runtimeUpdates !== "notify") return;
 		try {
 			const update = await checkAntigravityAcpUpdate();
@@ -336,7 +356,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		unsubscribeQuota();
-		await runtime.closeSession(ctx.sessionManager.getSessionId());
+		await Promise.all(shared.accounts.map(({ runtime: owner }) => owner.closeSession(ctx.sessionManager.getSessionId())));
 		await releaseSharedRuntime(shared, event.reason);
 	});
 }

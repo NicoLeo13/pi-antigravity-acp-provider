@@ -206,6 +206,7 @@ describe("extension entry point", () => {
 			toolActivity: "off",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 	});
 });

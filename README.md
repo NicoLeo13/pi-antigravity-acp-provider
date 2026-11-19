@@ -78,6 +78,25 @@ The model catalog comes from the official ACP server. ACP 1.4.x exposes model an
 
 On macOS the Antigravity server keeps the consumer token in the login keychain (service `gemini`, account `antigravity-acp`) and uses the 0600 file `~/.gemini/antigravity-acp/acp_token.json` only when that keychain is unusable. A keychain that is empty while a refreshable token file exists therefore leaves the server with no credentials it can see: every new ACP server process reports `Credentials missing or invalid`, opens interactive Google consent (which forces the consent screen on every process), and can exceed the session-setup deadline. This provider detects exactly that mismatch and pins the child to the secure-file backend it inspects, so the saved login is reused. Set `AGY_ACP_FORCE_FILE_STORAGE` yourself to take full control of the choice. `doctor`/`status` reports the expected backend as `Credential storage (preflight):`, since the running server's own functional probe can still fall back to the file store. An explicit `GEMINI_HOME` relocates the whole tree, including the token file, and is honored by setup, health checks, logout, and the credential-storage decision.
 
+### Multiple accounts
+
+Each Google account gets its own Pi provider, so account selection is the normal model picker: choose a model under `Google Antigravity (ACP)` or under `Google Antigravity (ACP) — Work`. No automatic rotation or failover is performed; picking the model is an explicit account choice.
+
+Configure extra accounts in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json`:
+
+```json
+{
+  "accounts": [
+    { "id": "work", "label": "Work", "geminiHome": "~/.gemini-work" },
+    { "id": "personal", "geminiHome": "/home/me/.gemini-personal" }
+  ]
+}
+```
+
+The implicit default account is unchanged and uses the ambient `~/.gemini` tree with provider id `antigravity-acp`. Each configured account is isolated by `GEMINI_HOME` (the same tree `agy --gemini_dir` would use) and gets provider id `antigravity-acp-<id>`. Tokens, settings, quota and saved ACP sessions are per account: extra accounts store sessions in `sessions/<id>.json` beside the config. Sign in by choosing the account's provider in Pi's `/login`; `logout` only clears the default account.
+
+Ids must be lowercase slugs (`a-z`, `0-9`, dashes), `default` is reserved, homes must be absolute (`~` is expanded), and two accounts may not share a home. Rejected entries are reported as a warning on session start rather than silently ignored. Account eligibility and plan quota belong to Google; two logins to the same Google account do not create a second quota.
+
 ## Commands
 
 ```text
@@ -98,9 +117,9 @@ On macOS the Antigravity server keeps the consumer token in the login keychain (
 /antigravity-acp tool-activity [off|compact|full]
 ```
 
-Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic` (only provider-managed installations are replaced), and `toolActivity` defaults to `compact` (one line per Antigravity `tool_call` start; `off` hides them, `full` includes all updates and details). ACP session bindings are saved beside the config in `sessions.json`.
+Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic` (only provider-managed installations are replaced), and `toolActivity` defaults to `compact` (one line per Antigravity `tool_call` start; `off` hides them, `full` includes all updates and details). ACP session bindings are saved beside the config in `sessions.json`, or in `sessions/<id>.json` for a configured account.
 
-On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations.
+On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations. Use the `accounts` setting above to isolate accounts.
 
 `logout`/`account` clears local Antigravity credentials and saved ACP sessions. Run Pi's `/logout` afterward to remove the Pi credential marker, then `/login` for the new account. `update` checks the official registry and installs the latest approved release from the provider's signed runtime catalog. If the registry is newer than the catalog, it reports the pending version and uses the latest signed release without downgrading an already newer managed runtime. See [`docs/RUNTIME-UPDATES.md`](docs/RUNTIME-UPDATES.md).
 

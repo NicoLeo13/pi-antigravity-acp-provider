@@ -164,6 +164,21 @@ describe("per-account environment", () => {
 		expect(captured[0]?.BROWSER).toBeDefined();
 	});
 
+	it("scopes provider auth checks to each account's home", async () => {
+		const work = accountHome();
+		const other = accountHome();
+		writeAccountToken(work);
+		const workRuntime = new AntigravityRuntime(undefined, "yolo", undefined, { env: { HOME: work } });
+		const otherRuntime = new AntigravityRuntime(undefined, "yolo", undefined, { env: { HOME: other } });
+		try {
+			expect(workRuntime.hasLocalAuth()).toBe(true);
+			expect(otherRuntime.hasLocalAuth()).toBe(false);
+		} finally {
+			await workRuntime.close();
+			await otherRuntime.close();
+		}
+	});
+
 	it("clears the account's credentials on logout", async () => {
 		const home = accountHome();
 		const accountToken = writeAccountToken(home, "account");
