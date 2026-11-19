@@ -40,6 +40,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 		saveRuntimeUpdateMode("notify", file);
 		savePermissionMode("auto_edit", file);
@@ -50,6 +51,7 @@ describe("permission configuration", () => {
 			toolActivity: "off",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 	});
 
@@ -101,6 +103,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 		savePermissionMode("default");
 		expect(loadConfig()).toEqual({
@@ -109,6 +112,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 
 		const configFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
@@ -152,6 +156,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 		const targetFile = path.join(fakeHome, ".pi", "agent", "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -179,6 +184,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 		const targetFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -207,6 +213,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 		expect(fs.readFileSync(target, "utf8")).toBe(existing);
 		fs.unlinkSync(target);
@@ -216,6 +223,7 @@ describe("permission configuration", () => {
 			toolActivity: "compact",
 			toolBridge: "ecosystem",
 			isolatedGeminiHome: true,
+			accounts: [],
 		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);

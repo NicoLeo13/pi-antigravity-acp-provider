@@ -7,12 +7,25 @@ export type RuntimeUpdateMode = "automatic" | "notify" | "manual";
 export type ToolActivityMode = "off" | "compact" | "full";
 export type ToolBridgeMode = "all" | "ecosystem";
 
+/** A second Google account, isolated by its own Gemini home. The default
+ * account is implicit and uses the ambient environment, so `id` may never be
+ * `default`. */
+export interface AntigravityAccountConfig {
+	/** Slug used in the Pi provider id (`antigravity-acp-<id>`). */
+	id: string;
+	/** Picker label; the id is used when absent. */
+	label?: string;
+	/** Equivalent to `agy --gemini_dir`: tokens, settings and quota live here. */
+	geminiHome: string;
+}
+
 export interface AntigravityAcpConfig {
 	permissions: PermissionMode;
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
 	toolBridge: ToolBridgeMode;
 	isolatedGeminiHome: boolean;
+	accounts: AntigravityAccountConfig[];
 }
 
 export function resolvePiAgentDir(): string {
@@ -55,6 +68,7 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			toolActivity?: unknown;
 			toolBridge?: unknown;
 			isolatedGeminiHome?: unknown;
+			accounts?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
@@ -62,6 +76,7 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
 			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "ecosystem",
 			isolatedGeminiHome: typeof parsed.isolatedGeminiHome === "boolean" ? parsed.isolatedGeminiHome : true,
+			accounts: parseAccounts(parsed.accounts),
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
@@ -72,7 +87,28 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 		toolActivity: "compact",
 		toolBridge: "ecosystem",
 		isolatedGeminiHome: true,
+		accounts: [],
 	};
+}
+
+/** Keeps well-formed entries; whether an entry is usable (slug, reserved id,
+ * duplicate, absolute path) is decided in `resolveAccounts`, which can report
+ * a problem instead of silently dropping the account. */
+function parseAccounts(value: unknown): AntigravityAccountConfig[] {
+	if (!Array.isArray(value)) return [];
+	const accounts: AntigravityAccountConfig[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object") continue;
+		const { id, label, geminiHome } = entry as Record<string, unknown>;
+		if (typeof id !== "string") continue;
+		if (typeof geminiHome !== "string" || !geminiHome.trim()) continue;
+		accounts.push({
+			id: id.trim(),
+			geminiHome: geminiHome.trim(),
+			...(typeof label === "string" && label.trim() ? { label: label.trim() } : {}),
+		});
+	}
+	return accounts;
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
