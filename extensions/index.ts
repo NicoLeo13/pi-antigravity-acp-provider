@@ -4,7 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { inspectAntigravityAuth } from "../src/acp/antigravity.js";
+import { inspectAntigravityAuth, resolveAntigravityAcpDirectory } from "../src/acp/antigravity.js";
 import { describeCredentialStorage } from "../src/acp/credential-storage.js";
 import { errorMessage } from "../src/acp/errors.js";
 import { resolveAntigravityAcpEntry } from "../src/acp/process.js";
@@ -60,12 +60,24 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	const runtime = shared.accounts[0]!.runtime;
 	for (const { provider } of shared.accounts) pi.registerProvider(provider);
 
-	// Other extensions ask for quota with `{ reply }` and get exactly one `{ ok, quota | error }`.
+	// Other extensions ask for quota with `{ reply }` and get exactly one
+	// `{ ok, quota | error }`. An optional account id (or Pi provider id)
+	// selects which Google account is read; without it the default one answers.
 	const unsubscribeQuota = pi.events.on(QUOTA_REQUEST_CHANNEL, (data) => {
-		const reply = (data as { reply?: unknown } | undefined)?.reply;
+		const request = data as { reply?: unknown; account?: unknown; providerId?: unknown } | undefined;
+		const reply = request?.reply;
 		if (typeof reply !== "function" || claimedQuotaRequests.has(data as object)) return;
 		claimedQuotaRequests.add(data as object);
-		void runtime.quota(undefined).then(
+		const target = typeof request?.providerId === "string"
+			? request.providerId
+			: typeof request?.account === "string" ? request.account : undefined;
+		const owner = target === undefined
+			? shared.accounts[0]!
+			: shared.accounts.find(({ account }) => account.id === target || account.providerId === target);
+		const snapshot = owner
+			? owner.runtime.quota(undefined)
+			: Promise.reject(new Error(`Unknown Antigravity account "${target}"`));
+		void snapshot.then(
 			(quota) => ({ ok: true as const, quota }),
 			(error: unknown) => ({ ok: false as const, error: errorMessage(error) }),
 		).then((result) => {
@@ -236,7 +248,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					);
 					return;
 				}
-				runtime.setToolActivityMode(requested);
+				for (const { runtime: owner } of shared.accounts) owner.setToolActivityMode(requested);
 				saveToolActivityMode(requested);
 				ctx.ui.notify(`Antigravity tool activity: ${requested}`, "info");
 				return;
@@ -256,7 +268,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					ctx.ui.notify("Usage: /antigravity-acp tool-bridge [ecosystem|all]", "warning");
 					return;
 				}
-				runtime.setToolBridgeMode(requested);
+				for (const { runtime: owner } of shared.accounts) owner.setToolBridgeMode(requested);
 				saveToolBridgeMode(requested);
 				ctx.ui.notify(`Antigravity Pi MCP tool bridge: ${requested}`, "info");
 				return;
@@ -277,7 +289,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					return;
 				}
 				const enabled = requested === "on";
-				runtime.setIsolatedGeminiHome(enabled);
+				for (const { runtime: owner } of shared.accounts) owner.setIsolatedGeminiHome(enabled);
 				saveIsolatedGeminiHome(enabled);
 				ctx.ui.notify(`Antigravity isolated GEMINI_HOME: ${requested} (applies to new connections)`, "info");
 				return;
@@ -297,27 +309,62 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				entry = error instanceof Error ? error.message : String(error);
 			}
 			const snapshot = await runtime.snapshot(verbose);
-			const auth = inspectAntigravityAuth();
 			const setup = inspectRuntimeSetup();
 			const update = await checkAntigravityAcpUpdate().catch(() => undefined);
+			const processLines = (item: (typeof snapshot)["processes"][number]) => [
+				`• pid=${item.pid ?? "?"} generation=${item.generation} model=${item.modelId} confirmedMode=${item.confirmedPermissionMode} alive=${item.alive} restored=${item.restored} agent=${item.agentVersion ?? "?"} mcpHttp=${item.mcpHttp} permission=${item.waitingForPermission} tools=${item.waitingForTools} ignoredStdoutNoise=${item.ignoredStdoutNoiseLines}`,
+				`  omitted Pi tools: ${item.omittedTools.length ? item.omittedTools.map((tool) => `${tool.name} (${tool.reason})`).join("; ") : "none"}`,
+				...(verbose && item.stderrTail ? [`  stderr (redacted): ${item.stderrTail}`] : []),
+			];
+			// Credentials and quota are per account, so inspect each account's
+			// own home instead of the ambient one.
+			const reports = await Promise.all(shared.accounts.map(async ({ account, runtime: owner }) => {
+				const env = account.env ?? process.env;
+				const home = resolveAntigravityAcpDirectory(env);
+				const auth = inspectAntigravityAuth(home, env);
+				const report = await owner.snapshot(verbose);
+				return { account, home, auth, storage: describeCredentialStorage({ env }), report };
+			}));
+			const modeLines = [
+				`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
+				`Tool activity mode: ${snapshot.toolActivityMode}`,
+				`Tool bridge mode: ${snapshot.toolBridgeMode}`,
+				`Isolated GEMINI_HOME: ${snapshot.isolatedGeminiHome ? "on" : "off"}`,
+			];
+			const accountLines: string[] = [];
+			if (shared.accounts.length === 1) {
+				// Keep the historical single-account output byte-identical.
+				const only = reports[0]!;
+				accountLines.push(
+					`Authentication: ${only.auth.status}${only.auth.authType ? ` (${only.auth.authType})` : ""}`,
+					`Credential storage (preflight): ${only.storage}`,
+					...modeLines,
+					`Active bindings: ${only.report.bindings}`,
+					formatMetrics(only.report.metrics),
+					...only.report.processes.flatMap(processLines),
+				);
+			} else {
+				accountLines.push(...modeLines);
+				for (const report of reports) {
+					accountLines.push(
+						`Account ${report.account.name} (${report.account.providerId}):`,
+						`  Credentials: ${report.home}`,
+						`  Authentication: ${report.auth.status}${report.auth.authType ? ` (${report.auth.authType})` : ""}`,
+						`  Credential storage (preflight): ${report.storage}`,
+						`  Active bindings: ${report.report.bindings}`,
+					);
+					for (const line of formatMetrics(report.report.metrics).split("\n")) accountLines.push(`  ${line}`);
+					for (const item of report.report.processes) {
+						for (const line of processLines(item)) accountLines.push(`  ${line}`);
+					}
+				}
+			}
 			ctx.ui.notify(
 				[
 					`Antigravity ACP provider ${PACKAGE_VERSION}`,
 					`Runtime: installed=${setup.installedVersion ?? "external/unknown"} approved=${update?.approvedVersion ?? setup.approvedVersion} registry=${update?.latestVersion ?? "unavailable"} updates=${setup.updateMode}; ACP SDK ${ACP_SDK_VERSION}, protocol ${ACP_PROTOCOL_VERSION}`,
 					`Antigravity server: ${entry}`,
-					`Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
-					`Credential storage (preflight): ${describeCredentialStorage()}`,
-					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
-					`Tool activity mode: ${snapshot.toolActivityMode}`,
-					`Tool bridge mode: ${snapshot.toolBridgeMode}`,
-					`Isolated GEMINI_HOME: ${snapshot.isolatedGeminiHome ? "on" : "off"}`,
-					`Active bindings: ${snapshot.bindings}`,
-					formatMetrics(snapshot.metrics),
-					...snapshot.processes.flatMap((item) => [
-						`• pid=${item.pid ?? "?"} generation=${item.generation} model=${item.modelId} confirmedMode=${item.confirmedPermissionMode} alive=${item.alive} restored=${item.restored} agent=${item.agentVersion ?? "?"} mcpHttp=${item.mcpHttp} permission=${item.waitingForPermission} tools=${item.waitingForTools} ignoredStdoutNoise=${item.ignoredStdoutNoiseLines}`,
-						`  omitted Pi tools: ${item.omittedTools.length ? item.omittedTools.map((tool) => `${tool.name} (${tool.reason})`).join("; ") : "none"}`,
-						...(verbose && item.stderrTail ? [`  stderr (redacted): ${item.stderrTail}`] : []),
-					]),
+					...accountLines,
 				].join("\n"),
 				"info",
 			);

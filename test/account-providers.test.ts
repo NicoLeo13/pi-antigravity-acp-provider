@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
-import { PERMISSION_TOOL_NAME } from "../src/runtime.js";
+import { QUOTA_REQUEST_CHANNEL } from "../src/constants.js";
+import { PERMISSION_TOOL_NAME, type AntigravityRuntime } from "../src/runtime.js";
 import {
 	createFakeContext,
 	createFakeExtensionApi,
@@ -120,6 +121,56 @@ describe("multi-account extension", () => {
 		if (!tool) throw new Error("missing permission tool");
 		const result = await tool.execute("call", { requestId: call.id }, undefined, undefined, ctx as never);
 		expect(result.details).toMatchObject({ requestId: call.id, optionId: "allow-once", cancelled: false });
+	});
+
+	it("routes quota event requests to the named account", async () => {
+		const { pi } = await load();
+		const { AntigravityRuntime } = await import("../src/runtime.js");
+		const workHome = path.join(root, "work-home");
+		vi.spyOn(AntigravityRuntime.prototype, "quota").mockImplementation(function (this: AntigravityRuntime) {
+			const home = (this as unknown as { baseEnv?: NodeJS.ProcessEnv }).baseEnv?.GEMINI_HOME;
+			return Promise.resolve({ at: 0, groups: [{ displayName: home ?? "ambient", buckets: [] }] });
+		});
+
+		const request = (extra: object = {}) => new Promise<unknown>((resolve) => {
+			pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { ...extra, reply: resolve });
+		});
+		expect(await request()).toMatchObject({ ok: true, quota: { groups: [{ displayName: "ambient" }] } });
+		expect(await request({ account: "work" })).toMatchObject({ ok: true, quota: { groups: [{ displayName: workHome }] } });
+		expect(await request({ providerId: "antigravity-acp-work" })).toMatchObject({
+			ok: true,
+			quota: { groups: [{ displayName: workHome }] },
+		});
+		expect(await request({ account: "missing" })).toMatchObject({
+			ok: false,
+			error: expect.stringContaining('Unknown Antigravity account "missing"'),
+		});
+	});
+
+	it("reports credentials per account in doctor output", async () => {
+		const { pi, ctx } = await load();
+		const workHome = path.join(root, "work-home");
+		const directory = path.join(workHome, "antigravity-acp");
+		fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+		fs.writeFileSync(path.join(directory, "acp_token.json"), '{"refresh_token":"work-token"}', { mode: 0o600 });
+		fs.writeFileSync(path.join(directory, "settings.json"), '{"auth":{"type":"oauth-personal"}}', { mode: 0o600 });
+
+		const command = pi.commands.get("antigravity-acp")!;
+		await command.handler("doctor", ctx as never);
+		const text = ctx.ui.notify.mock.calls.at(-1)![0] as string;
+		expect(text).toContain(`Account Google Antigravity (ACP) — Work (antigravity-acp-work):`);
+		expect(text).toContain(`Credentials: ${directory}`);
+		expect(text).toContain("Authentication: oauth-refreshable (oauth-personal)");
+		expect(text).toContain("Authentication: missing");
+	});
+
+	it("applies tool-activity changes to every account's runtime", async () => {
+		const { pi, ctx } = await load();
+		const command = pi.commands.get("antigravity-acp")!;
+		await command.handler("tool-activity off", ctx as never);
+		const turn = await stream("antigravity-acp-work", [user("emit tool activity")], "work-activity");
+		const thinking = turn.content.filter((block) => block.type === "thinking").map((block) => block.thinking).join("\n");
+		expect(thinking).not.toContain("[Antigravity tool:");
 	});
 
 	it("keeps the account's session store isolated and closes every runtime", async () => {

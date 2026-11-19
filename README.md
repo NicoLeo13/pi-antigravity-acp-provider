@@ -129,6 +129,8 @@ On first use of a custom profile without a config, existing permission/update se
 pi.events.emit("antigravity-acp:quota:request", { reply: (result) => { /* ... */ } });
 ```
 
+With multiple accounts, pass `{ account: "<id>" }` (or `{ providerId: "<provider id>" }`) to read that account's quota; omitting it reads the default account, and an unknown id returns an error. `doctor`/`status` likewise show authentication and credential storage for each account.
+
 `reply` is called exactly once per emitted request object, even when several provider instances share the event bus, with `{ ok: true, quota }` or `{ ok: false, error }`. `quota` is an `AntigravityQuotaSnapshot`, exported as a type by the package: `{ at: number; groups: { displayName: string; buckets: { window: string; remainingFraction: number; resetTime?: string }[] }[] }`. `at` is the read time in epoch milliseconds, `window` is `weekly`, `5h`, or the server's label for any other limit, `remainingFraction` has 1% precision, and `resetTime` is ISO 8601 at minute precision.
 
 ## Development
