@@ -259,6 +259,30 @@ describe("multi-account extension", () => {
 		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Google Antigravity (ACP) — Work");
 	});
 
+	it("accepts an explicit account id for logout without prompting", async () => {
+		const { pi } = await load();
+		const directory = path.join(root, "work-home", "antigravity-acp");
+		fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+		const token = path.join(directory, "acp_token.json");
+		fs.writeFileSync(token, '{"refresh_token":"work"}', { mode: 0o600 });
+		const ctx = createFakeContext({ sessionId: "logout-argument" });
+		await pi.commands.get("antigravity-acp")!.handler("logout work", ctx as never);
+		expect(fs.existsSync(token)).toBe(false);
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
+
+	it("keeps credentials on disk when an account is removed from the picker", async () => {
+		const { pi } = await load();
+		const directory = path.join(root, "work-home", "antigravity-acp");
+		fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+		const token = path.join(directory, "acp_token.json");
+		fs.writeFileSync(token, '{"refresh_token":"work"}', { mode: 0o600 });
+		const ctx = createFakeContext({ sessionId: "remove-keeps-token", confirmAnswer: () => true });
+		await pi.commands.get("antigravity-acp")!.handler("accounts remove work", ctx as never);
+		expect(registry.has("antigravity-acp-work")).toBe(false);
+		expect(fs.existsSync(token)).toBe(true);
+	});
+
 	it("asks which account setup targets", async () => {
 		const { pi } = await load();
 		const ctx = createFakeContext({ sessionId: "setup", selectAnswer: () => undefined });

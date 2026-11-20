@@ -47,21 +47,24 @@ export function resolveAccounts(config: AntigravityAcpConfig = loadConfig()): Ac
 	];
 	const problems: string[] = [];
 	const ids = new Set<string>([DEFAULT_ACCOUNT_ID]);
+	const labels = new Set<string>();
 	const homes = new Map<string, string>();
 
 	for (const entry of config.accounts) {
-		const problem = accountProblem(entry, ids, homes);
+		const problem = accountProblem(entry, ids, labels, homes);
 		if (problem) {
 			problems.push(problem);
 			continue;
 		}
 		const home = expandHome(entry.geminiHome);
+		const label = entry.label?.trim() || entry.id;
 		ids.add(entry.id);
+		labels.add(label);
 		homes.set(home, entry.id);
 		accounts.push({
 			id: entry.id,
 			providerId: accountProviderId(entry.id),
-			name: `${DEFAULT_ACCOUNT_NAME} — ${entry.label ?? entry.id}`,
+			name: `${DEFAULT_ACCOUNT_NAME} — ${label}`,
 			// The account is isolated by GEMINI_HOME, which is what the managed
 			// server reads for tokens, settings and quota.
 			env: { ...process.env, GEMINI_HOME: home },
@@ -80,6 +83,7 @@ export function accountProviderId(id: string): string {
 function accountProblem(
 	entry: AntigravityAccountConfig,
 	ids: Set<string>,
+	labels: Set<string>,
 	homes: Map<string, string>,
 ): string | undefined {
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(entry.id)) {
@@ -89,6 +93,10 @@ function accountProblem(
 		return `account id "default" is reserved for the ambient account`;
 	}
 	if (ids.has(entry.id)) return `account "${entry.id}" is declared twice`;
+	// The label is what the picker shows and what an explicit argument may
+	// match, so two identical labels would make selection ambiguous.
+	const label = entry.label?.trim() || entry.id;
+	if (labels.has(label)) return `account label "${label}" is used twice`;
 	const home = expandHome(entry.geminiHome);
 	if (!path.isAbsolute(home)) {
 		return `account "${entry.id}" needs an absolute geminiHome (got "${entry.geminiHome}")`;

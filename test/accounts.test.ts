@@ -90,6 +90,15 @@ describe("account resolution", () => {
 });
 
 describe("account configuration", () => {
+	it("rejects duplicate picker labels so selection stays unambiguous", () => {
+		const resolved = resolveAccounts(config([
+			{ id: "one", label: "Same", geminiHome: "/tmp/one" },
+			{ id: "two", label: "Same", geminiHome: "/tmp/two" },
+		]));
+		expect(resolved.accounts.map((account) => account.id)).toEqual(["default", "one"]);
+		expect(resolved.problems).toEqual(['account label "Same" is used twice']);
+	});
+
 	it("loads accounts and keeps them when another setting is saved", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-accounts-config-"));
 		roots.push(root);

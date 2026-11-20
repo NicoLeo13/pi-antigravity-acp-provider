@@ -147,9 +147,14 @@ async function removeAccount(
 	if (!confirmed) return;
 	const removed = removeSharedAccount(shared, target.account.id);
 	if (!removed) return;
-	pi.unregisterProvider(removed.provider.id);
-	await removed.runtime.close();
+	// Persist first: if unregistration throws, the account is still removed on
+	// restart and the detached runtime must not leak.
 	saveAccounts(loadConfig().accounts.filter((account) => account.id !== target.account.id));
+	try {
+		pi.unregisterProvider(removed.provider.id);
+	} finally {
+		await removed.runtime.close();
+	}
 	ctx.ui.notify(
 		`Removed ${target.account.name}. Choose another model if it was selected. Local credentials were not deleted.`,
 		"info",
