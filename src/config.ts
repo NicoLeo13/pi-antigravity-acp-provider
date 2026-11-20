@@ -5,11 +5,13 @@ import path from "node:path";
 export type PermissionMode = "default" | "auto_edit" | "yolo";
 export type RuntimeUpdateMode = "automatic" | "notify" | "manual";
 export type ToolActivityMode = "off" | "compact" | "full";
+export type ToolBridgeMode = "all" | "ecosystem";
 
 export interface AntigravityAcpConfig {
 	permissions: PermissionMode;
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
+	toolBridge: ToolBridgeMode;
 }
 
 export function resolvePiAgentDir(): string {
@@ -50,16 +52,18 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			permissions?: unknown;
 			runtimeUpdates?: unknown;
 			toolActivity?: unknown;
+			toolBridge?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
+			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "all",
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" };
+	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "all" };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
@@ -72,6 +76,10 @@ export function saveRuntimeUpdateMode(mode: RuntimeUpdateMode, file = resolveCon
 
 export function saveToolActivityMode(mode: ToolActivityMode, file = resolveConfigPath()): void {
 	writeConfig({ ...loadConfig(file), toolActivity: mode }, file);
+}
+
+export function saveToolBridgeMode(mode: ToolBridgeMode, file = resolveConfigPath()): void {
+	writeConfig({ ...loadConfig(file), toolBridge: mode }, file);
 }
 
 function writeConfig(config: AntigravityAcpConfig, file: string): void {
@@ -118,6 +126,10 @@ export function isRuntimeUpdateMode(value: unknown): value is RuntimeUpdateMode 
 
 export function isToolActivityMode(value: unknown): value is ToolActivityMode {
 	return value === "off" || value === "compact" || value === "full";
+}
+
+export function isToolBridgeMode(value: unknown): value is ToolBridgeMode {
+	return value === "all" || value === "ecosystem";
 }
 
 export function permissionModeLabel(mode: PermissionMode): string {

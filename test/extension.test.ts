@@ -200,7 +200,41 @@ describe("extension entry point", () => {
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity runtime updates: notify", "info"]);
 		await command.handler("permissions auto-edit", ctx as never);
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity permission mode: auto-edit.", "info"]);
-		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "off" });
+		expect(loadConfig()).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "notify",
+			toolActivity: "off",
+			toolBridge: "all",
+		});
+	});
+
+	it("configures tool-bridge via command arguments, interactive selector, and doctor output", async () => {
+		const { pi, ctx } = await load("parent");
+		const { loadConfig } = await import("../src/config.js");
+		const command = pi.commands.get("antigravity-acp")!;
+
+		expect(loadConfig().toolBridge).toBe("all");
+
+		await command.handler("tool-bridge ecosystem", ctx as never);
+		expect(loadConfig().toolBridge).toBe("ecosystem");
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity Pi MCP tool bridge: ecosystem", "info"]);
+
+		await command.handler("doctor", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Tool bridge mode: ecosystem");
+
+		const selectCtx = createFakeContext({
+			sessionId: "parent",
+			cwd: root,
+			selectAnswer: (labels) => labels.find((label) => label.startsWith("all ")),
+		});
+		await command.handler("tool-bridge", selectCtx as never);
+		expect(loadConfig().toolBridge).toBe("all");
+
+		await command.handler("tool-bridge invalid", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
+			"Usage: /antigravity-acp tool-bridge [all|ecosystem]",
+			"warning",
+		]);
 	});
 });
 

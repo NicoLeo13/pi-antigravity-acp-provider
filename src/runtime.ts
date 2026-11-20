@@ -48,7 +48,7 @@ import {
 	type ToolOmission,
 	type PiToolInvocation,
 } from "./mcp/bridge.js";
-import type { PermissionMode, ToolActivityMode } from "./config.js";
+import type { PermissionMode, ToolActivityMode, ToolBridgeMode } from "./config.js";
 import { resolveAcpModelId } from "./models.js";
 import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
@@ -130,12 +130,14 @@ export interface AntigravityRuntimeOptions {
 	maxBindings?: number;
 	idleMs?: number;
 	toolActivityMode?: ToolActivityMode;
+	toolBridgeMode?: ToolBridgeMode;
 }
 
 export interface RuntimeSnapshot {
 	bindings: number;
 	permissionMode: PermissionMode;
 	toolActivityMode: ToolActivityMode;
+	toolBridgeMode: ToolBridgeMode;
 	metrics: ReturnType<RuntimeMetrics["snapshot"]>;
 	processes: Array<{
 		key: string;
@@ -182,6 +184,7 @@ export class AntigravityRuntime {
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
 	private toolActivityMode: ToolActivityMode;
+	private toolBridgeMode: ToolBridgeMode;
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
 	private quotaInFlight: { epoch: number; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
 
@@ -195,6 +198,7 @@ export class AntigravityRuntime {
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
 		this.toolActivityMode = options?.toolActivityMode ?? "compact";
+		this.toolBridgeMode = options?.toolBridgeMode ?? "all";
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
@@ -447,6 +451,10 @@ export class AntigravityRuntime {
 		this.toolActivityMode = mode;
 	}
 
+	setToolBridgeMode(mode: ToolBridgeMode): void {
+		this.toolBridgeMode = mode;
+	}
+
 	getPermission(requestId: string): PermissionView | undefined {
 		for (const binding of this.resolvedBindings) {
 			if (binding.permission?.id === requestId) return permissionView(binding.permission);
@@ -483,6 +491,7 @@ export class AntigravityRuntime {
 			bindings: processes.length,
 			permissionMode: this.permissionMode,
 			toolActivityMode: this.toolActivityMode,
+			toolBridgeMode: this.toolBridgeMode,
 			metrics: this.metrics.snapshot(),
 			processes,
 		};
@@ -563,7 +572,7 @@ export class AntigravityRuntime {
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			// Check before continuation early returns as well as before fresh prompts.
 			if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||
-				binding.toolFingerprint !== piToolFingerprint(tools)) {
+				binding.toolFingerprint !== piToolFingerprint(tools, this.toolBridgeMode)) {
 				await this.invalidateBinding(binding);
 				this.assertSessionEpoch(key, epoch, sessionEpoch);
 				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
@@ -666,7 +675,7 @@ export class AntigravityRuntime {
 				if (
 					binding.needsReconstruction || binding.mode !== this.permissionMode ||
 					this.confirmedMode(binding) !== this.permissionMode ||
-					binding.toolFingerprint !== piToolFingerprint(tools) ||
+					binding.toolFingerprint !== piToolFingerprint(tools, this.toolBridgeMode) ||
 					context.messages.length < binding.messageCount ||
 					messagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
 						binding.historyFingerprint
@@ -909,12 +918,13 @@ export class AntigravityRuntime {
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const omittedTools = initialize.agentCapabilities?.mcpCapabilities?.http === true
-				? planToolProjection(tools)
+				? planToolProjection(tools, this.toolBridgeMode)
 				: tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
 			let mcpServer;
 			if (tools.length > 0 && initialize.agentCapabilities?.mcpCapabilities?.http === true) {
 				bridge = new PiMcpBridge({
 					tools,
+					toolBridgeMode: this.toolBridgeMode,
 					onCall: (invocation) => this.requestPiTool(binding, invocation),
 				});
 				mcpServer = await bridge.start();
@@ -981,7 +991,7 @@ export class AntigravityRuntime {
 				inferences: 0,
 				toolBatchTimer: undefined,
 				bridge,
-				toolFingerprint: piToolFingerprint(tools),
+				toolFingerprint: piToolFingerprint(tools, this.toolBridgeMode),
 				omittedTools,
 				turnCompletion: undefined,
 				abortRequested: false,

@@ -13,7 +13,9 @@ import {
 	savePermissionMode,
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
+	saveToolBridgeMode,
 	isToolActivityMode,
+	isToolBridgeMode,
 } from "../src/config.js";
 
 const directories: string[] = [];
@@ -34,11 +36,21 @@ describe("permission configuration", () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-config-"));
 		directories.push(directory);
 		const file = path.join(directory, "nested", "config.json");
-		expect(loadConfig(file)).toEqual({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig(file)).toEqual({
+			permissions: "yolo",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 		saveRuntimeUpdateMode("notify", file);
 		savePermissionMode("auto_edit", file);
 		saveToolActivityMode("off", file);
-		expect(loadConfig(file)).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "off" });
+		expect(loadConfig(file)).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "notify",
+			toolActivity: "off",
+			toolBridge: "all",
+		});
 	});
 
 	it("validates and persists toolActivity modes while defaulting invalid values to compact", () => {
@@ -58,6 +70,32 @@ describe("permission configuration", () => {
 		expect(loadConfig(file).toolActivity).toBe("full");
 		saveToolActivityMode("compact", file);
 		expect(loadConfig(file).toolActivity).toBe("compact");
+	});
+
+	it("defaults toolBridge to all and only persists ecosystem explicitly", () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-tool-bridge-"));
+		directories.push(directory);
+		const file = path.join(directory, "config.json");
+
+		expect(isToolBridgeMode("all")).toBe(true);
+		expect(isToolBridgeMode("ecosystem")).toBe(true);
+		expect(isToolBridgeMode("core")).toBe(false);
+
+		expect(loadConfig(file).toolBridge).toBe("all");
+
+		fs.writeFileSync(
+			file,
+			JSON.stringify({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "ecosystem" }),
+		);
+		expect(loadConfig(file).toolBridge).toBe("ecosystem");
+
+		fs.writeFileSync(file, JSON.stringify({ toolBridge: "bogus" }));
+		expect(loadConfig(file).toolBridge).toBe("all");
+
+		saveToolBridgeMode("ecosystem", file);
+		expect(loadConfig(file).toolBridge).toBe("ecosystem");
+		saveToolBridgeMode("all", file);
+		expect(loadConfig(file).toolBridge).toBe("all");
 	});
 
 	it("resolves default agent directory and config paths when PI_CODING_AGENT_DIR is unset", () => {
@@ -83,9 +121,19 @@ describe("permission configuration", () => {
 		expect(resolveConfigRoot()).toBe(path.join(customAgentDir, "antigravity-acp-provider"));
 		expect(resolveConfigPath()).toBe(path.join(customAgentDir, "antigravity-acp-provider", "config.json"));
 
-		expect(loadConfig()).toEqual({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "yolo",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 		savePermissionMode("default");
-		expect(loadConfig()).toEqual({ permissions: "default", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "default",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 
 		const configFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(configFile)).toBe(true);
@@ -122,7 +170,12 @@ describe("permission configuration", () => {
 			JSON.stringify({ permissions: "auto_edit", runtimeUpdates: "manual" }),
 		);
 
-		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "manual", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "manual",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 		const targetFile = path.join(fakeHome, ".pi", "agent", "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
 	});
@@ -143,7 +196,12 @@ describe("permission configuration", () => {
 		directories.push(customAgentDir);
 		process.env.PI_CODING_AGENT_DIR = customAgentDir;
 
-		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "auto_edit",
+			runtimeUpdates: "notify",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 		const targetFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
 		expect(fs.readFileSync(path.join(defaultAntigravityDir, "config.json"), "utf8")).toBe(
@@ -165,10 +223,20 @@ describe("permission configuration", () => {
 		fs.mkdirSync(path.dirname(target), { recursive: true });
 		const existing = JSON.stringify({ permissions: "default", runtimeUpdates: "manual" });
 		fs.writeFileSync(target, existing);
-		expect(loadConfig()).toEqual({ permissions: "default", runtimeUpdates: "manual", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "default",
+			runtimeUpdates: "manual",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 		expect(fs.readFileSync(target, "utf8")).toBe(existing);
 		fs.unlinkSync(target);
-		expect(loadConfig()).toEqual({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" });
+		expect(loadConfig()).toEqual({
+			permissions: "yolo",
+			runtimeUpdates: "automatic",
+			toolActivity: "compact",
+			toolBridge: "all",
+		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);
 	});
