@@ -61,6 +61,11 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 		medium: "gemini-4-argon-medium",
 		high: "gemini-4-argon-high",
 	}),
+	reasoningModel("gemini-4-carbon", "Gemini 4 Carbon", {
+		low: "gemini-4-carbon-low",
+		medium: "gemini-4-carbon-medium",
+		high: "gemini-4-carbon-high",
+	}),
 	reasoningModel("gemini-3.7-flash", "Gemini 3.7 Flash", {
 		low: "gemini-3.7-flash-low",
 		medium: "gemini-3.7-flash-medium",
@@ -126,6 +131,37 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 			: fixedModel(id, candidate.name.trim() || id));
 	}
 	return projected;
+}
+
+/** Rebuild a catalog persisted by an earlier discovery. Entries are rebuilt from
+ * their id, name and advertised tiers rather than trusted verbatim, so current
+ * cost rates and model limits apply and malformed or foreign entries are skipped. */
+export function restoreModels(stored: readonly unknown[]): Model<typeof API_ID>[] {
+	const restored: Model<typeof API_ID>[] = [];
+	const ids = new Set<string>();
+	for (const entry of stored) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as Partial<Model<typeof API_ID>>;
+		if (candidate.provider !== PROVIDER_ID || candidate.api !== API_ID) continue;
+		const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+		if (!validModelId(id) || ids.has(id)) continue;
+		const name = typeof candidate.name === "string" && candidate.name.trim() ? candidate.name.trim() : id;
+		if (candidate.reasoning === true) {
+			const variants: Variants = {};
+			for (const effort of ["low", "medium", "high", "xhigh"] as const) {
+				const value = candidate.thinkingLevelMap?.[effort];
+				if (typeof value === "string" && validModelId(value)) variants[effort] = value;
+			}
+			if (Object.keys(variants).length === 0) continue;
+			restored.push(reasoningModel(id, name, variants));
+		} else if (candidate.reasoning === false) {
+			restored.push(fixedModel(id, name));
+		} else {
+			continue;
+		}
+		ids.add(id);
+	}
+	return restored;
 }
 
 export type ModelEffort = "low" | "medium" | "high" | "xhigh";

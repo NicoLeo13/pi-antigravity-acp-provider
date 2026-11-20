@@ -10,7 +10,7 @@ import type {
 } from "@earendil-works/pi-ai";
 
 import { hasAntigravityAuth } from "./acp/antigravity.js";
-import { FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.js";
+import { FALLBACK_MODELS, projectModels, PROVIDER_ID, restoreModels } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
 
 export interface AntigravityProviderBundle {
@@ -105,7 +105,18 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 		},
 		getModels: () => models,
 		async refreshModels(context: RefreshModelsContext) {
-			if (!context.allowNetwork) return;
+			if (!context.allowNetwork) {
+				// Restore the last discovered catalog before Pi resolves startup model
+				// patterns, so models outside the offline fallback stay selectable.
+				const restored = restoreModels(context.stored?.models ?? []);
+				if (restored.length === 0) return;
+				await context.publish({
+					update: () => {
+						models = restored;
+					},
+				});
+				return;
+			}
 			const key =
 				context.credential?.type === "api_key"
 					? context.credential.key
@@ -122,6 +133,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 			}
 			if (discovered.length === 0) return;
 			await context.publish({
+				persist: { models: discovered, checkedAt: Date.now() },
 				update: () => {
 					models = discovered;
 				},
