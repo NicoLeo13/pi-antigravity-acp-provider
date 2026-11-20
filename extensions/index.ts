@@ -24,6 +24,7 @@ import {
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
 	saveToolBridgeMode,
+	saveIsolatedGeminiHome,
 	type PermissionMode,
 } from "../src/config.js";
 import {
@@ -243,10 +244,31 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				ctx.ui.notify(`Antigravity Pi MCP tool bridge: ${requested}`, "info");
 				return;
 			}
-			const verbose = command === "doctor --verbose";
+				if (command === "isolated-home" || command.startsWith("isolated-home ")) {
+				let requested = command.slice("isolated-home".length).trim().toLowerCase();
+				if (!requested) {
+					const choices = [
+						"off — inherit ~/.gemini directly",
+						"on — isolate GEMINI_HOME so ~/.gemini/GEMINI.md, config and skills are not loaded twice (default)",
+					];
+					const selected = await ctx.ui.select("Antigravity isolated GEMINI_HOME", choices);
+					if (!selected) return;
+					requested = selected.split(" ", 1)[0]!;
+				}
+				if (requested !== "on" && requested !== "off") {
+					ctx.ui.notify("Usage: /antigravity-acp isolated-home [on|off]", "warning");
+					return;
+				}
+				const enabled = requested === "on";
+				runtime.setIsolatedGeminiHome(enabled);
+				saveIsolatedGeminiHome(enabled);
+				ctx.ui.notify(`Antigravity isolated GEMINI_HOME: ${requested} (applies to new connections)`, "info");
+				return;
+			}
+		const verbose = command === "doctor --verbose";
 			if (command !== "doctor" && command !== "status" && !verbose) {
 				ctx.ui.notify(
-					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge]",
+					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge|isolated-home]",
 					"warning",
 				);
 				return;
@@ -271,6 +293,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
 					`Tool activity mode: ${snapshot.toolActivityMode}`,
 					`Tool bridge mode: ${snapshot.toolBridgeMode}`,
+					`Isolated GEMINI_HOME: ${snapshot.isolatedGeminiHome ? "on" : "off"}`,
 					`Active bindings: ${snapshot.bindings}`,
 					formatMetrics(snapshot.metrics),
 					...snapshot.processes.flatMap((item) => [

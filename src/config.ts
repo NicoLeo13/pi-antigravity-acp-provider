@@ -12,6 +12,7 @@ export interface AntigravityAcpConfig {
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
 	toolBridge: ToolBridgeMode;
+	isolatedGeminiHome: boolean;
 }
 
 export function resolvePiAgentDir(): string {
@@ -53,17 +54,25 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			runtimeUpdates?: unknown;
 			toolActivity?: unknown;
 			toolBridge?: unknown;
+			isolatedGeminiHome?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
 			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "all",
+			isolatedGeminiHome: typeof parsed.isolatedGeminiHome === "boolean" ? parsed.isolatedGeminiHome : false,
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "all" };
+	return {
+		permissions: "yolo",
+		runtimeUpdates: "automatic",
+		toolActivity: "compact",
+		toolBridge: "all",
+		isolatedGeminiHome: false,
+	};
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
@@ -80,6 +89,10 @@ export function saveToolActivityMode(mode: ToolActivityMode, file = resolveConfi
 
 export function saveToolBridgeMode(mode: ToolBridgeMode, file = resolveConfigPath()): void {
 	writeConfig({ ...loadConfig(file), toolBridge: mode }, file);
+}
+
+export function saveIsolatedGeminiHome(enabled: boolean, file = resolveConfigPath()): void {
+	writeConfig({ ...loadConfig(file), isolatedGeminiHome: enabled }, file);
 }
 
 function writeConfig(config: AntigravityAcpConfig, file: string): void {

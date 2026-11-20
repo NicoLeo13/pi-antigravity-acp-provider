@@ -41,6 +41,7 @@ export { MANAGED_AUTH_MARKER, PERMISSION_RESULT_KIND, PERMISSION_TOOL_NAME } fro
 import { mapSessionUpdate } from "./acp/events.js";
 import { ensureAntigravityAcpReady } from "./acp/setup.js";
 import { HeadlessOAuthRelay, shouldUseHeadlessOAuth } from "./acp/headless-oauth.js";
+import { applyIsolatedGeminiEnvironment } from "./acp/isolated-home.js";
 import {
 	PiMcpBridge,
 	piToolFingerprint,
@@ -131,6 +132,7 @@ export interface AntigravityRuntimeOptions {
 	idleMs?: number;
 	toolActivityMode?: ToolActivityMode;
 	toolBridgeMode?: ToolBridgeMode;
+	isolatedGeminiHome?: boolean;
 }
 
 export interface RuntimeSnapshot {
@@ -138,6 +140,7 @@ export interface RuntimeSnapshot {
 	permissionMode: PermissionMode;
 	toolActivityMode: ToolActivityMode;
 	toolBridgeMode: ToolBridgeMode;
+	isolatedGeminiHome: boolean;
 	metrics: ReturnType<RuntimeMetrics["snapshot"]>;
 	processes: Array<{
 		key: string;
@@ -185,6 +188,7 @@ export class AntigravityRuntime {
 	private permissionMode: PermissionMode;
 	private toolActivityMode: ToolActivityMode;
 	private toolBridgeMode: ToolBridgeMode;
+	private isolatedGeminiHome: boolean;
 	private quotaCache: AntigravityQuotaSnapshot | undefined;
 	private quotaInFlight: { epoch: number; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
 
@@ -199,6 +203,7 @@ export class AntigravityRuntime {
 		this.permissionMode = permissionMode;
 		this.toolActivityMode = options?.toolActivityMode ?? "compact";
 		this.toolBridgeMode = options?.toolBridgeMode ?? "all";
+		this.isolatedGeminiHome = options?.isolatedGeminiHome ?? false;
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
@@ -455,6 +460,10 @@ export class AntigravityRuntime {
 		this.toolBridgeMode = mode;
 	}
 
+	setIsolatedGeminiHome(enabled: boolean): void {
+		this.isolatedGeminiHome = enabled;
+	}
+
 	getPermission(requestId: string): PermissionView | undefined {
 		for (const binding of this.resolvedBindings) {
 			if (binding.permission?.id === requestId) return permissionView(binding.permission);
@@ -492,6 +501,7 @@ export class AntigravityRuntime {
 			permissionMode: this.permissionMode,
 			toolActivityMode: this.toolActivityMode,
 			toolBridgeMode: this.toolBridgeMode,
+			isolatedGeminiHome: this.isolatedGeminiHome,
 			metrics: this.metrics.snapshot(),
 			processes,
 		};
@@ -1224,7 +1234,10 @@ export class AntigravityRuntime {
 
 	private createConnection(options: AntigravityConnectionOptions): AntigravityAcpConnection {
 		this.assertActive();
-		const connection = this.connectionFactory(options);
+		const connectionOptions = this.isolatedGeminiHome && this.ensureAgent
+			? { ...options, env: applyIsolatedGeminiEnvironment(options.env) }
+			: options;
+		const connection = this.connectionFactory(connectionOptions);
 		this.activeConnections.add(connection);
 		void connection.process.exited.then(() => this.activeConnections.delete(connection)).catch(() => undefined);
 		return connection;

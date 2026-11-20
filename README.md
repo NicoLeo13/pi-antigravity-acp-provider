@@ -97,11 +97,13 @@ On macOS the Antigravity server keeps the consumer token in the login keychain (
 /antigravity-acp permissions yolo
 /antigravity-acp tool-activity [off|compact|full]
 /antigravity-acp tool-bridge [all|ecosystem]
+/antigravity-acp isolated-home [on|off]
 ```
 
 Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic` (only provider-managed installations are replaced), and `toolActivity` defaults to `compact` (one line per Antigravity `tool_call` start; `off` hides them, `full` includes all updates and details). ACP session bindings are saved beside the config in `sessions.json`.
 
 `toolBridge` also lives in that config file and defaults to `all`, projecting every active Pi tool through the `pi-bridge` MCP server so shipped behavior does not change. Setting it to `ecosystem` is an explicit opt-in that omits the core Pi tools `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`, leaving those operations to Antigravity's native tools. Those names can have custom Pi implementations and hooks; native Antigravity tools are not interchangeable with those implementations or their security/audit hooks. `doctor`/`status` still lists every omitted tool with its reason.
+`isolatedGeminiHome` also lives in that config file and defaults to `false` (`off`), so Antigravity inherits `~/.gemini` unless you explicitly opt in via `/antigravity-acp isolated-home on`. When enabled (and `GEMINI_HOME` is not already set in the environment), new ACP connections point `GEMINI_HOME` at `$PI_CODING_AGENT_DIR/antigravity-acp-provider/gemini-home` with a symlink (or Windows junction) for `antigravity-acp` back to your real credentials directory, keeping `~/.gemini/GEMINI.md`, `skills/`, and `antigravity-cli/` out of Pi ACP turns. If a non-symlink directory already exists at that `antigravity-acp` link path, isolation fails clearly without modifying it.
 
 On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations.
 

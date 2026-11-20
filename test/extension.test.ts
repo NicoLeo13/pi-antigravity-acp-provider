@@ -205,6 +205,7 @@ describe("extension entry point", () => {
 			runtimeUpdates: "notify",
 			toolActivity: "off",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 	});
 
@@ -233,6 +234,38 @@ describe("extension entry point", () => {
 		await command.handler("tool-bridge invalid", ctx as never);
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
 			"Usage: /antigravity-acp tool-bridge [all|ecosystem]",
+			"warning",
+		]);
+	});
+
+	it("configures isolated-home via command arguments, interactive selector, and doctor output", async () => {
+		const { pi, ctx } = await load("parent");
+		const { loadConfig } = await import("../src/config.js");
+		const command = pi.commands.get("antigravity-acp")!;
+
+		expect(loadConfig().isolatedGeminiHome).toBe(false);
+
+		await command.handler("isolated-home on", ctx as never);
+		expect(loadConfig().isolatedGeminiHome).toBe(true);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
+			"Antigravity isolated GEMINI_HOME: on (applies to new connections)",
+			"info",
+		]);
+
+		await command.handler("doctor", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Isolated GEMINI_HOME: on");
+
+		const selectCtx = createFakeContext({
+			sessionId: "parent",
+			cwd: root,
+			selectAnswer: (labels) => labels.find((label) => label.startsWith("off ")),
+		});
+		await command.handler("isolated-home", selectCtx as never);
+		expect(loadConfig().isolatedGeminiHome).toBe(false);
+
+		await command.handler("isolated-home invalid", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
+			"Usage: /antigravity-acp isolated-home [on|off]",
 			"warning",
 		]);
 	});

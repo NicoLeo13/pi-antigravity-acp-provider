@@ -10,6 +10,7 @@ import {
 	resolveConfigPath,
 	resolveConfigRoot,
 	resolvePiAgentDir,
+	saveIsolatedGeminiHome,
 	savePermissionMode,
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
@@ -41,6 +42,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 		saveRuntimeUpdateMode("notify", file);
 		savePermissionMode("auto_edit", file);
@@ -50,6 +52,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "notify",
 			toolActivity: "off",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 	});
 
@@ -98,6 +101,22 @@ describe("permission configuration", () => {
 		expect(loadConfig(file).toolBridge).toBe("all");
 	});
 
+	it("defaults isolatedGeminiHome to off and persists an explicit opt-in", () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-isolated-home-"));
+		directories.push(directory);
+		const file = path.join(directory, "config.json");
+
+		expect(loadConfig(file).isolatedGeminiHome).toBe(false);
+
+		fs.writeFileSync(file, JSON.stringify({ isolatedGeminiHome: "yes" }));
+		expect(loadConfig(file).isolatedGeminiHome).toBe(false);
+
+		saveIsolatedGeminiHome(true, file);
+		expect(loadConfig(file).isolatedGeminiHome).toBe(true);
+		saveIsolatedGeminiHome(false, file);
+		expect(loadConfig(file).isolatedGeminiHome).toBe(false);
+	});
+
 	it("resolves default agent directory and config paths when PI_CODING_AGENT_DIR is unset", () => {
 		delete process.env.PI_CODING_AGENT_DIR;
 		const defaultAgentDir = path.join(os.homedir(), ".pi", "agent");
@@ -126,6 +145,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 		savePermissionMode("default");
 		expect(loadConfig()).toEqual({
@@ -133,6 +153,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 
 		const configFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
@@ -175,6 +196,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "manual",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 		const targetFile = path.join(fakeHome, ".pi", "agent", "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -201,6 +223,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "notify",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 		const targetFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -228,6 +251,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "manual",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 		expect(fs.readFileSync(target, "utf8")).toBe(existing);
 		fs.unlinkSync(target);
@@ -236,6 +260,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			isolatedGeminiHome: false,
 		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);
