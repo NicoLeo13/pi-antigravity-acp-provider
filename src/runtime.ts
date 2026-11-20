@@ -573,57 +573,22 @@ export class AntigravityRuntime {
 				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
 			}
 
-			// A permission tool result resumes the still-running ACP prompt rather than
-			// starting a second Antigravity turn.
-			if (binding.permission && !binding.turnCompletion) {
-				cancelPermission(binding);
+			// Permission and Pi tool results resume the still-running ACP prompt rather than
+			// starting a second Antigravity turn. One inference can raise a pi-bridge call and a
+			// permission request together; Pi answers both in one continuation, so resolve both.
+			if (!binding.turnCompletion) {
+				if (binding.permission) cancelPermission(binding);
+				if (binding.pendingTools.size > 0) cancelPiTools(binding, "Antigravity turn ended before Pi returned the tool result");
 			}
-			if (binding.permission) {
-				const pending = binding.permission;
-				const result = findPermissionResult(context, pending.id);
-				if (!result) {
-					cancelPermission(binding);
-					await this.dropBinding(key, binding);
-					this.assertSessionEpoch(key, epoch, sessionEpoch);
-					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-				} else {
-					binding.writer = writer;
-					this.touchBinding(binding);
-					this.noteContinuationInstructions(binding, context);
-					binding.pendingContextCount = context.messages.length;
-					binding.pendingContextFingerprint = messagesFingerprint(context.messages);
-					this.commitProgress(binding);
-					binding.permission = undefined;
-					clearTimeout(pending.timer);
-					if (
-						!result.cancelled &&
-						result.optionId &&
-						pending.request.options.some((option) => option.optionId === result.optionId)
-					) {
-						pending.resolve({ outcome: { outcome: "selected", optionId: result.optionId } });
-					} else {
-						pending.resolve({ outcome: { outcome: "cancelled" } });
-					}
-					await this.awaitContinuation(binding, options.signal);
-					if (!writer.finished) {
-						writer.fail(
-							new AntigravityAcpError("protocol", "Antigravity ACP permission continuation ended without completing the response"),
-							options.signal?.aborted === true,
-						);
-					}
-					return;
-				}
-			}
-
-			if (binding.pendingTools.size > 0 && !binding.turnCompletion) {
-				cancelPiTools(binding, "Antigravity turn ended before Pi returned the tool result");
-			}
-			if (binding.pendingTools.size > 0) {
+			if (binding.permission || binding.pendingTools.size > 0) {
+				const permission = binding.permission;
+				const permissionResult = permission ? findPermissionResult(context, permission.id) : undefined;
 				const results = [...binding.pendingTools.values()].map((pending) => ({
 					pending,
 					message: findToolResult(context, pending.invocation.id, pending.invocation.name),
 				}));
-				if (results.some((result) => result.message === undefined)) {
+				if ((permission && !permissionResult) || results.some((result) => result.message === undefined)) {
+					cancelPermission(binding);
 					cancelPiTools(binding, "Pi continued without returning every requested tool result");
 					await this.dropBinding(key, binding);
 					this.assertSessionEpoch(key, epoch, sessionEpoch);
@@ -639,10 +604,25 @@ export class AntigravityRuntime {
 						binding.pendingTools.delete(pending.invocation.id);
 						pending.resolve(toMcpToolResult(message as ToolResultMessage));
 					}
+					if (permission && permissionResult) {
+						binding.permission = undefined;
+						clearTimeout(permission.timer);
+						if (
+							!permissionResult.cancelled &&
+							permissionResult.optionId &&
+							permission.request.options.some((option) => option.optionId === permissionResult.optionId)
+						) {
+							permission.resolve({ outcome: { outcome: "selected", optionId: permissionResult.optionId } });
+						} else {
+							permission.resolve({ outcome: { outcome: "cancelled" } });
+						}
+					}
 					await this.awaitContinuation(binding, options.signal);
 					if (!writer.finished) {
 						writer.fail(
-							new AntigravityAcpError("protocol", "Antigravity ACP tool continuation ended without completing the response"),
+							new AntigravityAcpError("protocol", permission
+								? "Antigravity ACP permission continuation ended without completing the response"
+								: "Antigravity ACP tool continuation ended without completing the response"),
 							options.signal?.aborted === true,
 						);
 					}
@@ -1039,7 +1019,8 @@ export class AntigravityRuntime {
 		binding: Binding | undefined,
 		invocation: PiToolInvocation,
 	): Promise<CallToolResult> {
-		if (!binding?.writer || binding.writer.finished || binding.permission || binding.abortRequested) {
+		const batchWriter = binding?.writer;
+		if (!binding || !batchWriter || batchWriter.finished || binding.permission || binding.abortRequested) {
 			return Promise.resolve({
 				content: [{ type: "text", text: "Pi cannot accept this tool call in the current turn" }],
 				isError: true,
@@ -1051,12 +1032,15 @@ export class AntigravityRuntime {
 				release = binding.connection.holdPromptWatchdog(binding.session.sessionId);
 				const held = release;
 				binding.pendingTools.set(invocation.id, { invocation, resolve: (result) => { held(); resolve(result); } });
-				binding.writer?.toolCall(invocation.id, invocation.name, invocation.arguments);
+				// End the slice that received this call; by the time the timer fires Pi may already
+				// be streaming the continuation through a newer writer.
+				batchWriter.toolCall(invocation.id, invocation.name, invocation.arguments);
 				if (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);
-				binding.toolBatchTimer = setTimeout(() => {
-					binding.toolBatchTimer = undefined;
-					binding.writer?.done("toolUse");
+				const batchTimer = setTimeout(() => {
+					if (binding.toolBatchTimer === batchTimer) binding.toolBatchTimer = undefined;
+					batchWriter.done("toolUse");
 				}, TOOL_BATCH_MS);
+				binding.toolBatchTimer = batchTimer;
 				binding.toolBatchTimer.unref();
 			} catch {
 				binding.pendingTools.delete(invocation.id);
@@ -1084,6 +1068,9 @@ export class AntigravityRuntime {
 			binding.permission = { id, request, resolve, timer };
 			try {
 				binding.writer?.toolCall(id, PERMISSION_TOOL_NAME, { requestId: id });
+				// This ends the slice, including any Pi tool calls still in the batching window.
+				if (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);
+				binding.toolBatchTimer = undefined;
 				binding.writer?.done("toolUse");
 			} catch {
 				clearTimeout(timer);

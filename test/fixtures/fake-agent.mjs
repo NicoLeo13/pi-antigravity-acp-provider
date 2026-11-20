@@ -24,6 +24,8 @@ let bridgePromptId;
 let mcpServer;
 // Set while the resource-exhausted scenario waits for the client to answer its permission request.
 let resumeAfterPermission;
+// Set while a bridge call and a permission request from the same inference are both outstanding.
+let resolveMixedPermission;
 
 for await (const line of rl) {
 	if (!line.trim()) continue;
@@ -46,7 +48,10 @@ for await (const line of rl) {
 	const { id, method, params } = message;
 	if (process.env.FAKE_AGENT_LOG_FILE && method) fs.appendFileSync(process.env.FAKE_AGENT_LOG_FILE,
 		JSON.stringify({ method, ...(method === "initialize" ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
-	if (id === "exhausted-permission" && method === undefined) {
+	if (id === "mixed-permission" && method === undefined) {
+		resolveMixedPermission?.(message.result?.outcome?.optionId ?? message.result?.outcome?.outcome ?? "cancelled");
+		resolveMixedPermission = undefined;
+	} else if (id === "exhausted-permission" && method === undefined) {
 		resumeAfterPermission?.();
 		resumeAfterPermission = undefined;
 	} else if (id === "permission-1" && method === undefined) {
@@ -283,6 +288,26 @@ for await (const line of rl) {
 			});
 			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
+		if (!continuing && text.includes("bridge and permission") && mcpServer) {
+			// Like agy in default mode: one inference starts a pi-bridge call, then asks to run a
+			// native action before that call returns. Both answers are needed to finish the prompt.
+			const decision = new Promise((resolve) => { resolveMixedPermission = resolve; });
+			const bridge = invokeMcpTool(mcpServer, "from gemini", () => {
+				setTimeout(() => send({ jsonrpc: "2.0", id: "mixed-permission", method: "session/request_permission", params: {
+					sessionId: params.sessionId,
+					toolCall: { toolCallId: "native-tool-2", title: "Run native command", kind: "execute" },
+					options: [
+						{ optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+						{ optionId: "reject-once", name: "Reject", kind: "reject_once" },
+					],
+				} }), 20);
+			});
+			void Promise.all([bridge, decision]).then(([result, choice]) => {
+				notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `${result}|${choice}` } });
+				send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			}).catch(() => undefined);
 			continue;
 		}
 		if (!continuing && text.includes("bridge") && mcpServer) {

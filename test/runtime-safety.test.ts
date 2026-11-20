@@ -486,6 +486,32 @@ describe("abort cleanup", () => {
 		} finally { vi.useRealTimers(); await runtime.close(); }
 	});
 
+	it("resumes a bridge call and a permission request raised by the same inference together", async () => {
+		const { runtime } = setup(undefined, "default");
+		const messages = [user("bridge and permission")];
+		const first = await drain(runtime.stream(model, { tools, messages }, { sessionId: "mixed", apiKey: "test-key" }));
+		expect(first.stopReason).toBe("toolUse");
+		const calls = first.content.filter((block) => block.type === "toolCall");
+		const echo = calls.find((block) => block.name === "echo");
+		const permission = calls.find((block) => block.name === PERMISSION_TOOL_NAME);
+		if (echo?.type !== "toolCall" || permission?.type !== "toolCall") throw new Error(`expected echo and permission calls, got ${JSON.stringify(calls)}`);
+
+		// Pi answers both calls at once, faster than the provider's tool batching window.
+		const second = await Promise.race([
+			drain(runtime.stream(model, { tools, messages: [...messages, first,
+				{ role: "toolResult", toolCallId: echo.id, toolName: echo.name, content: [{ type: "text", text: "echoed" }], isError: false, timestamp: 2 },
+				{ role: "toolResult", toolCallId: permission.id, toolName: PERMISSION_TOOL_NAME, content: [{ type: "text", text: "Allowed" }], isError: false, timestamp: 3,
+					details: { kind: PERMISSION_RESULT_KIND, requestId: permission.id, optionId: "allow-once", cancelled: false } },
+			] }, { sessionId: "mixed", apiKey: "test-key" })),
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("continuation hung")), 3000)),
+		]);
+		expect(second.stopReason).toBe("stop");
+		expect(second.content).toEqual([{ type: "text", text: "echoed|allow-once" }]);
+		// The batching timer of the first slice must not end a later slice.
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect((await runtime.snapshot()).processes[0]?.waitingForTools).toBe(0);
+	});
+
 	it("releases partially parked calls and rejects new calls after abort", async () => {
 		const { runtime } = setup();
 		const internals = runtime as unknown as { requestPiTool(binding: unknown, invocation: unknown): Promise<{ isError?: boolean }> };
