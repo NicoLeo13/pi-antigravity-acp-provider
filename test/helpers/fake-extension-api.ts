@@ -31,6 +31,11 @@ export function createFakeExtensionApi(registry: FakeProviderRegistry): FakeExte
 			providers.push(provider);
 			registry.set(provider.id, provider);
 		},
+		unregisterProvider(name: string) {
+			const index = providers.findIndex((provider) => provider.id === name);
+			if (index >= 0) providers.splice(index, 1);
+			registry.delete(name);
+		},
 		registerTool(tool: Tool) {
 			tools.set(tool.name, tool);
 		},
@@ -68,16 +73,29 @@ export interface FakeContext {
 	cwd: string;
 	hasUI: true;
 	sessionManager: { getSessionId(): string };
-	ui: { select: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
+	ui: {
+		select: ReturnType<typeof vi.fn>;
+		input: ReturnType<typeof vi.fn>;
+		confirm: ReturnType<typeof vi.fn>;
+		notify: ReturnType<typeof vi.fn>;
+	};
 }
 
-export function createFakeContext(options: { sessionId: string; cwd?: string; selectAnswer?: (labels: string[]) => string | undefined }): FakeContext {
+export function createFakeContext(options: {
+	sessionId: string;
+	cwd?: string;
+	selectAnswer?: (labels: string[]) => string | undefined;
+	inputAnswer?: (title: string, placeholder?: string) => string | undefined;
+	confirmAnswer?: (title: string, message: string) => boolean;
+}): FakeContext {
 	return {
 		cwd: options.cwd ?? process.cwd(),
 		hasUI: true,
 		sessionManager: { getSessionId: () => options.sessionId },
 		ui: {
 			select: vi.fn(async (_title: string, labels: string[]) => options.selectAnswer?.(labels)),
+			input: vi.fn(async (title: string, placeholder?: string) => options.inputAnswer?.(title, placeholder)),
+			confirm: vi.fn(async (title: string, message: string) => options.confirmAnswer?.(title, message) ?? false),
 			notify: vi.fn(),
 		},
 	};

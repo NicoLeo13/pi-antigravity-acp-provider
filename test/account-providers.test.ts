@@ -74,6 +74,8 @@ async function load() {
 
 const user = (content: string, timestamp = 1): Context["messages"][number] => ({ role: "user", content, timestamp });
 
+const configFile = () => path.join(root, "agent", "antigravity-acp-provider", "config.json");
+
 function stream(providerId: string, messages: Context["messages"], sessionId: string) {
 	const provider = registry.get(providerId);
 	if (!provider) throw new Error(`${providerId} is not registered`);
@@ -171,6 +173,100 @@ describe("multi-account extension", () => {
 		const turn = await stream("antigravity-acp-work", [user("emit tool activity")], "work-activity");
 		const thinking = turn.content.filter((block) => block.type === "thinking").map((block) => block.thinking).join("\n");
 		expect(thinking).not.toContain("[Antigravity tool:");
+	});
+
+	it("lists accounts from the menu without reading the JSON by hand", async () => {
+		const { pi } = await load();
+		const ctx = createFakeContext({
+			sessionId: "listed",
+			selectAnswer: (labels) => labels.find((label) => label === "List accounts"),
+		});
+		await pi.commands.get("antigravity-acp")!.handler("accounts", ctx as never);
+		const text = ctx.ui.notify.mock.calls.at(-1)![0] as string;
+		expect(text).toContain("antigravity-acp-work");
+		expect(text).toContain(path.join(root, "work-home", "antigravity-acp"));
+	});
+
+	it("adds an account from the interactive menu and registers its provider", async () => {
+		const { pi } = await load();
+		const extraHome = path.join(root, "extra-home");
+		const ctx = createFakeContext({
+			sessionId: "adder",
+			selectAnswer: (labels) => labels.find((label) => label === "Add an account"),
+			inputAnswer: (title) => title.startsWith("Antigravity account id")
+				? "extra"
+				: title.startsWith("Picker label") ? "Extra" : extraHome,
+		});
+		await pi.commands.get("antigravity-acp")!.handler("accounts", ctx as never);
+
+		expect([...registry.keys()]).toEqual(["antigravity-acp", "antigravity-acp-work", "antigravity-acp-extra"]);
+		expect(pi.providers.map((provider) => provider.name)).toContain("Google Antigravity (ACP) — Extra");
+		const config = JSON.parse(fs.readFileSync(configFile(), "utf8")) as {
+			accounts: Array<{ id: string; label?: string; geminiHome: string }>;
+		};
+		expect(config.accounts).toEqual([
+			{ id: "work", label: "Work", geminiHome: path.join(root, "work-home") },
+			{ id: "extra", label: "Extra", geminiHome: extraHome },
+		]);
+		await stream("antigravity-acp-extra", [user("hello")], "extra-session");
+		expect(captured.at(-1)?.GEMINI_HOME).toBe(extraHome);
+	});
+
+	it("removes an account from the menu, unregisters its provider and updates the config", async () => {
+		const { pi } = await load();
+		const ctx = createFakeContext({
+			sessionId: "remover",
+			selectAnswer: (labels) => labels.includes("Remove an account")
+				? "Remove an account"
+				: labels.find((label) => label.includes("Work")),
+			confirmAnswer: () => true,
+		});
+		await pi.commands.get("antigravity-acp")!.handler("accounts", ctx as never);
+
+		expect([...registry.keys()]).toEqual(["antigravity-acp"]);
+		expect(pi.providers.map((provider) => provider.id)).toEqual(["antigravity-acp"]);
+		const config = JSON.parse(fs.readFileSync(configFile(), "utf8")) as { accounts: unknown[] };
+		expect(config.accounts).toEqual([]);
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Removed Google Antigravity (ACP) — Work");
+	});
+
+	it("refuses to remove the default account", async () => {
+		const { pi } = await load();
+		const ctx = createFakeContext({
+			sessionId: "remover",
+			selectAnswer: (labels) => labels.includes("Remove an account")
+				? "Remove an account"
+				: labels.find((label) => label.includes("antigravity-acp)")),
+			confirmAnswer: () => true,
+		});
+		await pi.commands.get("antigravity-acp")!.handler("accounts", ctx as never);
+		expect([...registry.keys()]).toContain("antigravity-acp");
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("cannot be removed");
+	});
+
+	it("logs out the account selected from the menu only", async () => {
+		const { pi } = await load();
+		const directory = path.join(root, "work-home", "antigravity-acp");
+		fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+		const token = path.join(directory, "acp_token.json");
+		fs.writeFileSync(token, '{"refresh_token":"work"}', { mode: 0o600 });
+		const ctx = createFakeContext({
+			sessionId: "logout",
+			selectAnswer: (labels) => labels.find((label) => label.includes("Work")),
+		});
+		await pi.commands.get("antigravity-acp")!.handler("logout", ctx as never);
+		expect(fs.existsSync(token)).toBe(false);
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Google Antigravity (ACP) — Work");
+	});
+
+	it("asks which account setup targets", async () => {
+		const { pi } = await load();
+		const ctx = createFakeContext({ sessionId: "setup", selectAnswer: () => undefined });
+		await pi.commands.get("antigravity-acp")!.handler("setup", ctx as never);
+		expect(ctx.ui.select).toHaveBeenCalledWith("Antigravity account", [
+			"Google Antigravity (ACP) (antigravity-acp)",
+			"Google Antigravity (ACP) — Work (antigravity-acp-work)",
+		]);
 	});
 
 	it("keeps the account's session store isolated and closes every runtime", async () => {

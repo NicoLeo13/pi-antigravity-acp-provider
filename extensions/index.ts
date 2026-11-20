@@ -20,11 +20,14 @@ import {
 	isToolBridgeMode,
 	loadConfig,
 	permissionModeLabel,
+	saveAccounts,
 	saveIsolatedGeminiHome,
 	savePermissionMode,
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
 	saveToolBridgeMode,
+	type AntigravityAccountConfig,
+	type AntigravityAcpConfig,
 	type PermissionMode,
 } from "../src/config.js";
 import {
@@ -40,7 +43,15 @@ import {
 	type AntigravityConnectionFactory,
 	type PermissionToolResult,
 } from "../src/runtime.js";
-import { acquireSharedRuntime, releaseSharedRuntime } from "../src/shared-runtime.js";
+import {
+	acquireSharedRuntime,
+	addSharedAccount,
+	releaseSharedRuntime,
+	removeSharedAccount,
+	type SharedAccount,
+	type SharedRuntime,
+} from "../src/shared-runtime.js";
+import { DEFAULT_ACCOUNT_ID, resolveAccounts } from "../src/accounts.js";
 import { runSetupWizard } from "../src/wizard.js";
 
 export type { AntigravityQuotaSnapshot } from "../src/acp/usage-quota.js";
@@ -53,6 +64,96 @@ const claimedQuotaRequests = (claimSlots[CLAIMED_QUOTA_REQUESTS] ??= new WeakSet
 
 export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 	registerAntigravityAcp(pi);
+}
+
+async function chooseAccount(
+	ctx: ExtensionCommandContext,
+	shared: SharedRuntime,
+	argument?: string,
+): Promise<SharedAccount | undefined> {
+	const matches = (candidate: SharedAccount, value: string) =>
+		candidate.account.id === value ||
+		candidate.account.providerId === value ||
+		candidate.account.name === value;
+	if (argument) {
+		const found = shared.accounts.find((candidate) => matches(candidate, argument));
+		if (!found) ctx.ui.notify(`Unknown Antigravity account "${argument}"`, "warning");
+		return found;
+	}
+	if (shared.accounts.length === 1) return shared.accounts[0];
+	const labels = shared.accounts.map(({ account }) => `${account.name} (${account.providerId})`);
+	const selected = await ctx.ui.select("Antigravity account", labels);
+	if (!selected) return undefined;
+	return shared.accounts.find((candidate, index) => labels[index] === selected);
+}
+
+function describeAccounts(shared: SharedRuntime): string {
+	return shared.accounts.map(({ account }) =>
+		`${account.name} (${account.providerId}) → ${resolveAntigravityAcpDirectory(account.env ?? process.env)}`,
+	).join("\n");
+}
+
+async function addAccount(pi: ExtensionAPI, ctx: ExtensionCommandContext, shared: SharedRuntime): Promise<void> {
+	const config = loadConfig();
+	const id = (await ctx.ui.input("Antigravity account id", "work"))?.trim();
+	if (!id) return;
+	const label = (await ctx.ui.input("Picker label", id))?.trim();
+	const home = (await ctx.ui.input("Gemini home directory", "~/.gemini-work"))?.trim();
+	if (!home) return;
+	const entry: AntigravityAccountConfig = { id, geminiHome: home, ...(label ? { label } : {}) };
+	const candidate: AntigravityAcpConfig = { ...config, accounts: [...config.accounts, entry] };
+	// Only the new entry's errors matter: an existing broken account must not
+	// block adding a good one, and the warning still comes from resolveAccounts.
+	const problems = resolveAccounts(candidate).problems.slice(resolveAccounts(config).problems.length);
+	if (problems.length > 0) {
+		ctx.ui.notify(problems.join("; "), "warning");
+		return;
+	}
+	saveAccounts(candidate.accounts);
+	const resolved = resolveAccounts(candidate).accounts.find((account) => account.id === id);
+	if (!resolved) return;
+	const created = addSharedAccount(shared, resolved, candidate);
+	pi.registerProvider(created.provider);
+	ctx.ui.notify(
+		`Added ${resolved.name} (${resolved.providerId}). Run /login and choose that provider to sign in. Other open Pi sessions load it on restart.`,
+		"info",
+	);
+}
+
+async function removeAccount(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	shared: SharedRuntime,
+	argument?: string,
+): Promise<void> {
+	const target = await chooseAccount(ctx, shared, argument);
+	if (!target) return;
+	if (target.account.id === DEFAULT_ACCOUNT_ID) {
+		ctx.ui.notify("The default account cannot be removed.", "warning");
+		return;
+	}
+	const { bindings } = await target.runtime.snapshot();
+	if (bindings > 0) {
+		ctx.ui.notify(
+			`${target.account.name} has ${bindings} active binding(s). Close them before removing the account.`,
+			"warning",
+		);
+		return;
+	}
+	const confirmed = await ctx.ui.confirm(
+		"Remove Antigravity account",
+		`Remove ${target.account.name} from the picker? Local credentials in ${resolveAntigravityAcpDirectory(target.account.env ?? process.env)} are NOT deleted.`,
+	);
+	if (!confirmed) return;
+	const removed = removeSharedAccount(shared, target.account.id);
+	if (!removed) return;
+	pi.unregisterProvider(removed.provider.id);
+	await removed.runtime.close();
+	saveAccounts(loadConfig().accounts.filter((account) => account.id !== target.account.id));
+	ctx.ui.notify(
+		`Removed ${target.account.name}. Choose another model if it was selected. Local credentials were not deleted.`,
+		"info",
+	);
 }
 
 export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: AntigravityConnectionFactory): void {
@@ -134,8 +235,40 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 		description: "Set up, inspect, update, or configure Google Antigravity ACP",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const command = args.trim() || "doctor";
-			if (command === "setup") {
-				await runSetupWizard(ctx.ui, runtime);
+			if (command === "setup" || command.startsWith("setup ")) {
+				const target = await chooseAccount(ctx, shared, command.slice("setup".length).trim() || undefined);
+				if (!target) return;
+				await runSetupWizard(
+					ctx.ui,
+					target.runtime,
+					target.account.env
+						? { name: target.account.name, env: target.account.env }
+						: { name: target.account.name },
+				);
+				return;
+			}
+			if (command === "accounts" || command.startsWith("accounts ")) {
+				const action = command.slice("accounts".length).trim();
+				if (action === "list") {
+					ctx.ui.notify(describeAccounts(shared), "info");
+					return;
+				}
+				if (action === "add") {
+					await addAccount(pi, ctx, shared);
+					return;
+				}
+				if (action === "remove" || action.startsWith("remove ")) {
+					await removeAccount(pi, ctx, shared, action.slice("remove".length).trim() || undefined);
+					return;
+				}
+				const choice = await ctx.ui.select("Antigravity accounts", [
+					"List accounts",
+					"Add an account",
+					"Remove an account",
+				]);
+				if (choice === "List accounts") ctx.ui.notify(describeAccounts(shared), "info");
+				else if (choice === "Add an account") await addAccount(pi, ctx, shared);
+				else if (choice === "Remove an account") await removeAccount(pi, ctx, shared);
 				return;
 			}
 			if (command === "update" || command === "update-runtime") {
@@ -165,12 +298,19 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				ctx.ui.notify(`Antigravity runtime updates: ${requested}`, "info");
 				return;
 			}
-			if (command === "logout" || command === "account" || command === "switch-account") {
-				await runtime.logout();
+			if (
+				command === "logout" || command.startsWith("logout ") ||
+				command === "account" || command.startsWith("account ") ||
+				command === "switch-account" || command.startsWith("switch-account ")
+			) {
+				const verb = command.split(" ", 1)[0]!;
+				const target = await chooseAccount(ctx, shared, command.slice(verb.length).trim() || undefined);
+				if (!target) return;
+				await target.runtime.logout();
 				ctx.ui.notify(
 					shared.accounts.length === 1
 						? "Local Antigravity credentials and saved ACP sessions were cleared. Run /logout for the old Pi marker, then /login to choose the next account."
-						: `Credentials and saved ACP sessions for ${shared.accounts[0]!.account.name} were cleared. Select that provider in /login to sign in again; other accounts are untouched.`,
+						: `Credentials and saved ACP sessions for ${target.account.name} were cleared. Select that provider in /login to sign in again; other accounts are untouched.`,
 					"info",
 				);
 				return;
@@ -297,7 +437,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 			const verbose = command === "doctor --verbose";
 			if (command !== "doctor" && command !== "status" && !verbose) {
 				ctx.ui.notify(
-					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge|isolated-home]",
+					"Usage: /antigravity-acp [setup|accounts|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge|isolated-home]",
 					"warning",
 				);
 				return;

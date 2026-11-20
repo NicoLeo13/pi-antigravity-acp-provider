@@ -131,6 +131,10 @@ export function saveIsolatedGeminiHome(enabled: boolean, file = resolveConfigPat
 	writeConfig({ ...loadConfig(file), isolatedGeminiHome: enabled }, file);
 }
 
+export function saveAccounts(accounts: AntigravityAccountConfig[], file = resolveConfigPath()): void {
+	writeConfig({ ...loadConfig(file), accounts }, file);
+}
+
 function writeConfig(config: AntigravityAcpConfig, file: string): void {
 	const directory = path.dirname(file);
 	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });

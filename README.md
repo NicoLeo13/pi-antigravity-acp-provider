@@ -82,7 +82,9 @@ On macOS the Antigravity server keeps the consumer token in the login keychain (
 
 Each Google account gets its own Pi provider, so account selection is the normal model picker: choose a model under `Google Antigravity (ACP)` or under `Google Antigravity (ACP) — Work`. No automatic rotation or failover is performed; picking the model is an explicit account choice.
 
-Configure extra accounts in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json`:
+Run `/antigravity-acp accounts` for an interactive menu that lists accounts, adds one (id, label, Gemini home) and removes one. Adding or removing takes effect in the current Pi session; other open sessions load the change on restart. `setup [account]` and `logout [account]` also prompt for an account when more than one is configured, and both accept an id or provider id as an argument.
+
+Accounts are persisted in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json`, which you can also edit directly:
 
 ```json
 {
@@ -93,14 +95,18 @@ Configure extra accounts in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/confi
 }
 ```
 
-The implicit default account is unchanged and uses the ambient `~/.gemini` tree with provider id `antigravity-acp`. Each configured account is isolated by `GEMINI_HOME` (the same tree `agy --gemini_dir` would use) and gets provider id `antigravity-acp-<id>`. Tokens, settings, quota and saved ACP sessions are per account: extra accounts store sessions in `sessions/<id>.json` beside the config. Sign in by choosing the account's provider in Pi's `/login`; `logout` only clears the default account.
+The implicit default account is unchanged and uses the ambient `~/.gemini` tree with provider id `antigravity-acp`. Each configured account is isolated by `GEMINI_HOME` (the same tree `agy --gemini_dir` would use) and gets provider id `antigravity-acp-<id>`. Tokens, settings, quota and saved ACP sessions are per account: extra accounts store sessions in `sessions/<id>.json` beside the config. Sign in by choosing the account's provider in Pi's `/login`; `logout` prompts for the account to clear. Removing an account from the picker does not delete its credentials from disk.
 
 Ids must be lowercase slugs (`a-z`, `0-9`, dashes), `default` is reserved, homes must be absolute (`~` is expanded), and two accounts may not share a home. Rejected entries are reported as a warning on session start rather than silently ignored. Account eligibility and plan quota belong to Google; two logins to the same Google account do not create a second quota.
 
 ## Commands
 
 ```text
-/antigravity-acp setup
+/antigravity-acp setup [account]
+/antigravity-acp accounts
+/antigravity-acp accounts list
+/antigravity-acp accounts add
+/antigravity-acp accounts remove [account]
 /antigravity-acp doctor
 /antigravity-acp doctor --verbose
 /antigravity-acp status
@@ -108,8 +114,8 @@ Ids must be lowercase slugs (`a-z`, `0-9`, dashes), `default` is reserved, homes
 /antigravity-acp update
 /antigravity-acp updates [automatic|notify|manual]
 /antigravity-acp qualify
-/antigravity-acp logout
-/antigravity-acp account
+/antigravity-acp logout [account]
+/antigravity-acp account [account]
 /antigravity-acp permissions
 /antigravity-acp permissions default
 /antigravity-acp permissions auto-edit
@@ -121,7 +127,7 @@ Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGE
 
 On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations. Use the `accounts` setting above to isolate accounts.
 
-`logout`/`account` clears local Antigravity credentials and saved ACP sessions. Run Pi's `/logout` afterward to remove the Pi credential marker, then `/login` for the new account. `update` checks the official registry and installs the latest approved release from the provider's signed runtime catalog. If the registry is newer than the catalog, it reports the pending version and uses the latest signed release without downgrading an already newer managed runtime. See [`docs/RUNTIME-UPDATES.md`](docs/RUNTIME-UPDATES.md).
+`logout`/`account` clears local Antigravity credentials and saved ACP sessions for the selected account (default when only one is configured). Run Pi's `/logout` afterward to remove its credential marker, then `/login` for the new account. `update` checks the official registry and installs the latest approved release from the provider's signed runtime catalog. If the registry is newer than the catalog, it reports the pending version and uses the latest signed release without downgrading an already newer managed runtime. See [`docs/RUNTIME-UPDATES.md`](docs/RUNTIME-UPDATES.md).
 
 `quota` shows each Antigravity quota group with the remaining percentage and UTC reset time of each limit, then this Pi process's token totals. The provider reads the quota by sending Antigravity's own `/usage` command to a separate short-lived ACP process, which runs no model turn and removes the short-lived conversation it creates once that process exits; the result is cached for 60 seconds. Other Pi extensions can request the same snapshot:
 

@@ -10,7 +10,7 @@ import {
 	DEFAULT_PROVIDER_ID,
 	resolveAccounts,
 } from "../src/accounts.js";
-import { loadConfig, savePermissionMode, type AntigravityAcpConfig } from "../src/config.js";
+import { loadConfig, saveAccounts, savePermissionMode, type AntigravityAcpConfig } from "../src/config.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -114,6 +114,29 @@ describe("account configuration", () => {
 				{ id: "work", label: "Work", geminiHome: "/tmp/work" },
 				{ id: "", geminiHome: "/tmp/invalid" },
 			],
+		});
+	});
+
+	it("saves accounts without losing the other settings", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-accounts-save-"));
+		roots.push(root);
+		const file = path.join(root, "config.json");
+		fs.writeFileSync(file, JSON.stringify({
+			permissions: "default",
+			runtimeUpdates: "notify",
+			toolActivity: "off",
+			toolBridge: "all",
+			isolatedGeminiHome: false,
+		}), { mode: 0o600 });
+
+		saveAccounts([{ id: "work", label: "Work", geminiHome: "/tmp/work" }], file);
+		expect(loadConfig(file)).toEqual({
+			permissions: "default",
+			runtimeUpdates: "notify",
+			toolActivity: "off",
+			toolBridge: "all",
+			isolatedGeminiHome: false,
+			accounts: [{ id: "work", label: "Work", geminiHome: "/tmp/work" }],
 		});
 	});
 
