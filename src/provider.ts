@@ -10,7 +10,7 @@ import type {
 } from "@earendil-works/pi-ai";
 
 import { hasAntigravityAuth } from "./acp/antigravity.js";
-import { FALLBACK_MODELS, projectModels, PROVIDER_ID, restoreModels } from "./models.js";
+import { FALLBACK_MODELS, modelForAcpStream, projectModels, PROVIDER_ID, restoreModels } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
 
 export interface AntigravityProviderBundle {
@@ -140,10 +140,10 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 			});
 		},
 		stream(model, context, options) {
-			return stream(runtime, model, context, options);
+			return stream(runtime, modelForAcpStream(model, models), context, options);
 		},
 		streamSimple(model, context, options) {
-			return stream(runtime, model, context, options);
+			return stream(runtime, modelForAcpStream(model, models), context, options);
 		},
 	};
 	return { provider, runtime };

@@ -2,13 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ModelsPublication, ModelsStoreEntry } from "@earendil-works/pi-ai";
+import { normalizeContext, type ModelsPublication, type ModelsStoreEntry } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import { AntigravityAcpConnection, type AntigravityConnectionOptions } from "../src/acp/connection.js";
 import { AcpSessionStore } from "../src/acp/session-store.js";
 import { findSessionSelector, sessionModels } from "../src/acp/session-state.js";
-import { projectModels } from "../src/models.js";
+import { projectModels, resolveAcpModelId } from "../src/models.js";
 import { createAntigravityProvider } from "../src/provider.js";
 import { AntigravityRuntime } from "../src/runtime.js";
 
@@ -137,6 +137,25 @@ describe("model selection integration", () => {
 				{ role: "user", content: "second", timestamp: 2 }] }, { sessionId: "warm-effort", reasoning: "high" }).stream.result();
 			expect(second.content).toEqual([{ type: "text", text: "gemini-b/high" }]);
 			expect((await runtime.snapshot()).processes[0]?.generation).toBe(generation);
+		} finally { await runtime.close(); }
+	});
+
+	it("routes a stale Pi startup model by exact ID after discovery, never by its copied Flash map", async () => {
+		const runtime = new AntigravityRuntime((options) => connection("new-gemini-4", options));
+		const { provider } = createAntigravityProvider(runtime);
+		const flash = provider.getModels().find((model) => model.id === "gemini-3.8-flash")!;
+		const synthetic = { ...flash, id: "gemini-4-test" };
+		try {
+			expect(resolveAcpModelId(synthetic, "high")).toBe("gemini-4-test");
+			const neon = provider.getModels().find((model) => model.id === "gemini-4-neon")!;
+			expect(resolveAcpModelId(neon, "high")).toBe("gemini-4-neon-high");
+			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal,
+				publish: async ({ update }) => { update?.(); return true; } });
+			expect(provider.getModels().find((model) => model.id === synthetic.id)?.thinkingLevelMap?.high).toBe("gemini-4-test-high");
+			const result = await provider.streamSimple!(synthetic, normalizeContext({ messages: [{ role: "user", content: "probe", timestamp: 1 }] }),
+				{ sessionId: "stale-startup-model", reasoning: "high" }).result();
+			expect(result.content).toEqual([{ type: "text", text: "gemini-4-test/high" }]);
+			expect((await runtime.snapshot()).processes[0]?.modelId).toBe("gemini-4-test-high");
 		} finally { await runtime.close(); }
 	});
 
