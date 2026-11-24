@@ -48,6 +48,42 @@ describe("AntigravityRuntime", () => {
 		}
 	});
 
+	it("keeps sessions that only read models, quota or auth out of the user's workspace", async () => {
+		// agy writes files such as skills/system/ into the cwd of each session it opens.
+		const agentDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-utility-cwd-")));
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		const cwds: { connection: string; session: string }[] = [];
+		const runtime = new AntigravityRuntime((options) => {
+			const connection = new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] });
+			const newSession = connection.newSession.bind(connection);
+			connection.newSession = (cwd, ...rest) => {
+				cwds.push({ connection: options.cwd, session: cwd });
+				return newSession(cwd, ...rest);
+			};
+			return connection;
+		});
+		const utilityCwd = path.join(agentDir, "antigravity-acp-provider", "utility-cwd");
+		try {
+			await runtime.discoverModels("test-key");
+			await runtime.verifyApiKey("test-key");
+			await runtime.loginGoogle();
+			await runtime.quota("test-key");
+			expect(cwds).toEqual(Array.from({ length: 4 }, () => ({ connection: utilityCwd, session: utilityCwd })));
+			expect(fs.statSync(utilityCwd).isDirectory()).toBe(true);
+
+			cwds.length = 0;
+			const turn = runtime.stream(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { apiKey: "test-key", sessionId: "workspace-session" });
+			for await (const _event of turn.stream) void _event;
+			expect(cwds).toEqual([{ connection: process.cwd(), session: process.cwd() }]);
+		} finally {
+			await runtime.close();
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			fs.rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
 	it("recognizes Gemini CLI's advertised Google login method", async () => {
 		const runtime = new AntigravityRuntime(
 			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),

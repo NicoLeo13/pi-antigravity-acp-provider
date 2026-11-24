@@ -26,6 +26,14 @@ export function resolveConfigRoot(): string {
 	return path.join(resolvePiAgentDir(), "antigravity-acp-provider");
 }
 
+// agy writes files (skills/system/…) into the cwd of a session. Sessions that only read
+// models, quota or auth use this folder, so they do not write into the user's workspace.
+export function resolveUtilityCwd(): string {
+	const dir = path.join(resolveConfigRoot(), "utility-cwd");
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return dir;
+}
+
 export function resolveConfigPath(): string {
 	return path.join(resolveConfigRoot(), "config.json");
 }

@@ -48,7 +48,7 @@ import {
 	type ToolOmission,
 	type PiToolInvocation,
 } from "./mcp/bridge.js";
-import type { PermissionMode, ToolActivityMode } from "./config.js";
+import { resolveUtilityCwd, type PermissionMode, type ToolActivityMode } from "./config.js";
 import { resolveAcpModelId } from "./models.js";
 import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
@@ -237,7 +237,7 @@ export class AntigravityRuntime {
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
 		if (signal?.aborted) throw abortError();
 		this.assertEpoch(epoch);
-		const cwd = process.cwd();
+		const cwd = resolveUtilityCwd();
 		const connection = this.createConnection({ cwd });
 		try {
 			const initialize = await connection.initialize(signal);
@@ -288,7 +288,7 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		let sessionId: string | undefined;
 		let text = "";
-		const cwd = process.cwd();
+		const cwd = resolveUtilityCwd();
 		const connection = this.createConnection({
 			cwd,
 			promptIdleTimeoutMs: QUOTA_TIMEOUT_MS,
@@ -327,7 +327,7 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		const useManualOAuth = manualInteraction !== undefined && shouldUseHeadlessOAuth();
 		const relay = useManualOAuth ? new HeadlessOAuthRelay() : undefined;
-		const cwd = process.cwd();
+		const cwd = resolveUtilityCwd();
 		const connection = this.createConnection({
 			cwd,
 			...(relay ? { env: relay.env } : {}),
@@ -392,7 +392,7 @@ export class AntigravityRuntime {
 		const epoch = this.bindingEpoch;
 		if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
 		this.assertEpoch(epoch);
-		const cwd = process.cwd();
+		const cwd = resolveUtilityCwd();
 		const connection = this.createConnection({ cwd });
 		try {
 			const initialize = await connection.initialize();
