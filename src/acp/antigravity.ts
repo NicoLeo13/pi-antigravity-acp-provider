@@ -122,27 +122,8 @@ export function inspectAntigravityAuth(
 	return { status: "missing", tokenFile, settingsFile };
 }
 
-export function hasAntigravityAuth(): boolean {
-	const status = inspectAntigravityAuth().status;
-	return status === "api-key-env" || status === "oauth-refreshable";
-}
-
-/** Local logout. Google currently advertises logout as an agent command rather
- * than an ACP SDK RPC, so this removes the local refresh token and auth choice. */
-export function clearAntigravityCredentials(
-	directory = resolveAntigravityAcpDirectory(),
-): void {
+export function clearAntigravityCredentials(directory: string): void {
 	fs.rmSync(path.join(directory, "acp_token.json"), { force: true });
-	const settingsPath = path.join(directory, "settings.json");
-	try {
-		const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
-		delete settings.auth;
-		const temporary = `${settingsPath}.${process.pid}.tmp`;
-		fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-		fs.renameSync(temporary, settingsPath);
-	} catch {
-		fs.rmSync(settingsPath, { force: true });
-	}
 }
 
 function directOrWrapper(command: string, source: AntigravityLaunch["source"]): AntigravityLaunch {

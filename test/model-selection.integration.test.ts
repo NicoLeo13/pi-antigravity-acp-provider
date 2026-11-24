@@ -125,7 +125,7 @@ describe("model selection integration", () => {
 		try {
 			let published = false;
 			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal,
-				publish: async ({ update }) => { update?.(); published = true; return true; } });
+				credential: { type: "api_key", key: "test-key" }, publish: async ({ update }) => { update?.(); published = true; return true; } });
 			expect(published).toBe(true);
 			const model = provider.getModels().find((candidate) => candidate.id === "gemini-b")!;
 			expect(model).toMatchObject({ reasoning: true, thinkingLevelMap: { low: "gemini-b-low", high: "gemini-b-high" } });
@@ -150,6 +150,7 @@ describe("model selection integration", () => {
 			const neon = provider.getModels().find((model) => model.id === "gemini-4-neon")!;
 			expect(resolveAcpModelId(neon, "high")).toBe("gemini-4-neon-high");
 			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal,
+				credential: { type: "api_key", key: "test-key" },
 				publish: async ({ update }) => { update?.(); return true; } });
 			expect(provider.getModels().find((model) => model.id === synthetic.id)?.thinkingLevelMap?.high).toBe("gemini-4-test-high");
 			const result = await provider.streamSimple!(synthetic, normalizeContext({ messages: [{ role: "user", content: "probe", timestamp: 1 }] }),
@@ -157,6 +158,50 @@ describe("model selection integration", () => {
 			expect(result.content).toEqual([{ type: "text", text: "gemini-4-test/high" }]);
 			expect((await runtime.snapshot()).processes[0]?.modelId).toBe("gemini-4-test-high");
 		} finally { await runtime.close(); }
+	});
+
+	it("discovers models with GEMINI_API_KEY when no stored credential exists, but refuses unauthenticated cached Google logins", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-env-key-discovery-"));
+		const tokenFile = path.join(root, "antigravity-acp-provider", "gemini", "antigravity-acp", "acp_token.json");
+		fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+		fs.writeFileSync(tokenFile, '{"refresh_token":"cached-google"}');
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const previousApiKey = process.env.GEMINI_API_KEY;
+		process.env.PI_CODING_AGENT_DIR = root;
+		delete process.env.GEMINI_API_KEY;
+
+		let spawns = 0;
+		const runtime = new AntigravityRuntime((options) => {
+			spawns += 1;
+			return connection("split", options);
+		});
+		const { provider } = createAntigravityProvider(runtime);
+		try {
+			let published = 0;
+			const publish = async ({ update }: ModelsPublication) => {
+				update?.();
+				published += 1;
+				return true;
+			};
+			// Without a stored credential or GEMINI_API_KEY, a cached Google token must not trigger discovery.
+			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal, publish });
+			expect(spawns).toBe(0);
+			expect(published).toBe(0);
+
+			// With GEMINI_API_KEY set in the environment, discovery proceeds using API-key auth.
+			process.env.GEMINI_API_KEY = "env-test-key";
+			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal, publish });
+			expect(spawns).toBe(1);
+			expect(published).toBe(1);
+			expect(provider.getModels().some((candidate) => candidate.id === "gemini-b")).toBe(true);
+		} finally {
+			await runtime.close();
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			if (previousApiKey === undefined) delete process.env.GEMINI_API_KEY;
+			else process.env.GEMINI_API_KEY = previousApiKey;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("persists the discovered catalog and restores it during the next offline startup phase", async () => {
@@ -169,7 +214,8 @@ describe("model selection integration", () => {
 			return true;
 		};
 		try {
-			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal, publish });
+			await provider.refreshModels!({ allowNetwork: true, signal: new AbortController().signal,
+				credential: { type: "api_key", key: "test-key" }, publish });
 			expect(persisted).toHaveLength(1);
 			const stored = persisted[0]!;
 			expect(stored.checkedAt).toEqual(expect.any(Number));

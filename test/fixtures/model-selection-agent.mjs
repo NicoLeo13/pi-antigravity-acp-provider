@@ -29,8 +29,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
 	const { id, method, params } = JSON.parse(line);
 	if (id === undefined) continue;
 	if (method === "initialize") {
-		reply(id, { protocolVersion: 1, agentInfo: { name: "model-selection-agent" }, authMethods: [],
+		reply(id, { protocolVersion: 1, agentInfo: { name: "model-selection-agent" },
+			authMethods: [{ id: "api", name: "Gemini API key" }],
 			agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } });
+	} else if (method === "authenticate") {
+		reply(id, {});
 	} else if (method === "session/new") {
 		reply(id, { sessionId: "selection-session", configOptions: configOptions() });
 	} else if (method === "session/resume" || method === "session/load") {

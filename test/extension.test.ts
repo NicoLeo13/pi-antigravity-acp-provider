@@ -58,12 +58,13 @@ async function load(sessionId: string, events?: FakeExtensionApi["api"]["events"
 	if (events) pi.api.events = events;
 	registerAntigravityAcp(pi.api, (options) => {
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
+			args: [fakeAgent], env: { ...options.env, FAKE_AGENT_LOG_FILE: log } });
 		connections.push(connection);
 		return connection;
 	});
 	const ctx = createFakeContext({ sessionId, cwd: root });
 	loaded.push({ pi, ctx });
+	await pi.emit("session_start", {}, ctx);
 	return { pi, ctx };
 }
 
@@ -85,6 +86,17 @@ describe("extension entry point", () => {
 		expect(registry.get("antigravity-acp")).toBe(pi.providers[0]);
 		expect(pi.tools.has(PERMISSION_TOOL_NAME)).toBe(true);
 		expect([...pi.commands.keys()]).toEqual(["antigravity-acp", "gemini-acp"]);
+	});
+
+	it("does not open an ACP quota session after Pi logout", async () => {
+		const { pi, ctx } = await load("parent");
+		ctx.modelRegistry.getApiKeyForProvider.mockResolvedValue(undefined);
+		await pi.commands.get("antigravity-acp")!.handler("quota", ctx as never);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Sign in with /login antigravity-acp"), "info");
+		const reply = vi.fn();
+		pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply });
+		await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining("Sign in") }));
+		expect(connections).toHaveLength(0);
 	});
 
 	it("keeps the parent session usable after a child instance shuts down", async () => {

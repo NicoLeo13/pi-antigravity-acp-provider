@@ -22,6 +22,8 @@ let permissionPromptId;
 let hangingPromptId;
 let bridgePromptId;
 let mcpServer;
+const tracksAuth = scenario === "headless-auth" || scenario === "browser-auth";
+let authMode = process.env.GEMINI_API_KEY ? "environment key" : "Google account";
 // Set while the resource-exhausted scenario waits for the client to answer its permission request.
 let resumeAfterPermission;
 // Set while a bridge call and a permission request from the same inference are both outstanding.
@@ -98,7 +100,19 @@ for await (const line of rl) {
 			setTimeout(() => process.exit(0), 10);
 		}
 	} else if (method === "authenticate") {
-		if (scenario === "headless-auth") {
+		if (tracksAuth && params.methodId === "api") authMode = "API key";
+		if (tracksAuth && params.methodId === "oauth-personal") {
+			const tokenFile = path.join(process.env.GEMINI_HOME, "antigravity-acp", "acp_token.json");
+			if (scenario === "browser-auth") {
+				fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+				fs.writeFileSync(tokenFile, '{"refresh_token":"browser-fixture"}');
+				send({ jsonrpc: "2.0", id, result: {} });
+				continue;
+			}
+			if (fs.existsSync(tokenFile)) {
+				send({ jsonrpc: "2.0", id, result: {} });
+				continue;
+			}
 			const state = "fake-oauth-state";
 			const server = http.createServer((request, response) => {
 				const callback = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -106,6 +120,8 @@ for await (const line of rl) {
 					response.writeHead(400).end("Invalid callback");
 					return;
 				}
+				fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+				fs.writeFileSync(tokenFile, JSON.stringify({ refresh_token: callback.searchParams.get("code") }));
 				response.writeHead(200).end("Authenticated");
 				server.close();
 				send({ jsonrpc: "2.0", id, result: {} });
@@ -224,8 +240,14 @@ for await (const line of rl) {
 				? `Intercepted /${slash}`
 				: scenario === "usage-unavailable"
 					? "### Session Usage\n- **Session total:** data not available yet\n\n### Quota Limits\n- Unable to retrieve quota status (backend unavailable)"
-					: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8");
+					: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8").replace("Gemini Models", tracksAuth ? authMode : "Gemini Models");
 			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply } } } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
+		if (tracksAuth) {
+			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId,
+				update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: authMode } } } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
 			continue;
 		}

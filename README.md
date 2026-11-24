@@ -64,11 +64,11 @@ When Pi is running over SSH, or on Linux without `DISPLAY`/`WAYLAND_DISPLAY`, `/
 3. Google redirects to an Antigravity loopback URL. The page may show a connection error because `127.0.0.1` refers to your local machine; copy the **complete final URL** from the browser address bar.
 4. Paste that URL into Pi. The provider validates its host, port, path, and OAuth state, then relays it to Antigravity's loopback listener on the server. An SSH port-forward is not required.
 
-Set `PI_ANTIGRAVITY_ACP_OAUTH_MODE=manual` to force this flow, or `PI_ANTIGRAVITY_ACP_OAUTH_MODE=browser` to force normal browser launch. OAuth URLs and callback codes are kept in a private temporary directory only for the duration of login and are never logged or persisted by this package.
+Set `PI_ANTIGRAVITY_ACP_OAUTH_MODE=manual` to force this flow, or `PI_ANTIGRAVITY_ACP_OAUTH_MODE=browser` to force normal browser launch. The manual relay is not supported on Windows. OAuth URLs and callback codes are kept in a private temporary directory only for the duration of login and are never logged or persisted by this package.
 
 For API-key authentication, choose **Enter an API key** and then **Antigravity Gemini API key** in `/login`, or set `GEMINI_API_KEY` before starting Pi.
 
-Antigravity owns OAuth tokens under `~/.gemini/antigravity-acp/`; Pi stores only a non-secret configured marker. Existing `agy` CLI credentials and Gemini CLI credentials should not be assumed to authenticate this separate ACP server.
+The ACP server manages the Google token in a private file under `$PI_CODING_AGENT_DIR/antigravity-acp-provider/gemini/antigravity-acp/`. Pi's auth store keeps only a non-secret marker. Each Pi profile has its own login; this provider does not use `GEMINI_HOME`, the shared macOS Keychain entry, or credentials from other Antigravity clients. If you upgraded from a version that used the shared store, sign in again with `/login antigravity-acp`. The old store is left untouched: profile-level settings, hooks, skills, and ACP conversations from that store are not carried over. Reconfigure anything you still need in the new profile. Pi chat history is unchanged.
 
 ### Model availability
 
@@ -76,9 +76,11 @@ The model catalog comes from the official ACP server. ACP 1.4.x exposes model an
 
 Pi 1.6.0 can synthesize a model for a CLI ID missing from its startup catalog, copying the thinking map from another model of the same provider. Background discovery updates `get_available_models`, but does not replace that already-selected model in `get_state`; `set_model` does. Neon is in the offline catalog for cold startup. For other IDs, the provider corrects stale thinking maps from an exact catalog match before streaming, and never uses another family's thinking map for an unknown `gemini-4-*` model.
 
-### macOS credential storage
+### Switch Google accounts
 
-On macOS the Antigravity server keeps the consumer token in the login keychain (service `gemini`, account `antigravity-acp`) and uses the 0600 file `~/.gemini/antigravity-acp/acp_token.json` only when that keychain is unusable. A keychain that is empty while a refreshable token file exists therefore leaves the server with no credentials it can see: every new ACP server process reports `Credentials missing or invalid`, opens interactive Google consent (which forces the consent screen on every process), and can exceed the session-setup deadline. This provider detects exactly that mismatch and pins the child to the secure-file backend it inspects, so the saved login is reused. Set `AGY_ACP_FORCE_FILE_STORAGE` yourself to take full control of the choice. `doctor`/`status` reports the expected backend as `Credential storage (preflight):`, since the running server's own functional probe can still fall back to the file store. An explicit `GEMINI_HOME` relocates the whole tree, including the token file, and is honored by setup, health checks, logout, and the credential-storage decision.
+Close other Pi processes using this profile, then run `/login antigravity-acp` and select the Google account you want. An explicit Google login clears the profile's previous cached token and ACP session bindings before opening Google sign-in. Normal Pi restarts still reuse the saved login. Manual/SSH login asks Google to show the account picker; if the browser flow defaults to the wrong account, use a private browser window with the manual flow.
+
+Pi's `/logout` removes the marker and stops Pi from using the saved OAuth login. Pi does not expose a provider logout callback, so to also delete the token immediately, run `/antigravity-acp logout` (or `account`). That command clears only this profile's Google token and saved ACP bindings. Run Pi's `/logout` as well if you want to remove the marker or a Pi-stored API key.
 
 ## Commands
 
@@ -102,9 +104,9 @@ On macOS the Antigravity server keeps the consumer token in the login keychain (
 
 Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic` (only provider-managed installations are replaced), and `toolActivity` defaults to `compact` (one line per Antigravity `tool_call` start; `off` hides them, `full` includes all updates and details). ACP session bindings are saved beside the config in `sessions.json`. Sessions that only read models, quota, or auth run in `utility-cwd/` beside the config, because Antigravity writes files such as `skills/system/` into the working directory of each session.
 
-On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations.
+On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions and Google credentials are not copied. The managed runtime installation is still shared across Pi profiles.
 
-`logout`/`account` clears local Antigravity credentials and saved ACP sessions. Run Pi's `/logout` afterward to remove the Pi credential marker, then `/login` for the new account. `update` checks the official registry and installs the latest approved release from the provider's signed runtime catalog. If the registry is newer than the catalog, it reports the pending version and uses the latest signed release without downgrading an already newer managed runtime. See [`docs/RUNTIME-UPDATES.md`](docs/RUNTIME-UPDATES.md).
+`update` checks the official registry and installs the latest approved release from the provider's signed runtime catalog. If the registry is newer than the catalog, it reports the pending version and uses the latest signed release without downgrading an already newer managed runtime. See [`docs/RUNTIME-UPDATES.md`](docs/RUNTIME-UPDATES.md).
 
 `quota` shows each Antigravity quota group with the remaining percentage and UTC reset time of each limit, then this Pi process's token totals. The provider reads the quota by sending Antigravity's own `/usage` command to a separate short-lived ACP process, which runs no model turn and removes the short-lived conversation it creates once that process exits; the result is cached for 60 seconds. Other Pi extensions can request the same snapshot:
 

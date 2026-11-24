@@ -38,7 +38,7 @@ function setup(
 	const connections: AntigravityAcpConnection[] = [];
 	const runtime = new AntigravityRuntime((options) => {
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
+			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...options.env, FAKE_AGENT_LOG_FILE: log } });
 		connections.push(connection); return connection;
 	}, mode, store, runtimeOptions);
 	runtimes.push(runtime);
@@ -854,7 +854,7 @@ describe("live quota", () => {
 		expect(fetchQuota).toHaveBeenCalledTimes(1);
 	});
 
-	it("starts a fresh quota read after logout while the old one is still in flight", async () => {
+	it.each(["logout", "credential change"])("starts a fresh quota read on %s while the old one is still in flight", async (change) => {
 		const { root, runtime } = setup();
 		vi.stubEnv("GEMINI_HOME", path.join(root, "gemini"));
 		try {
@@ -867,17 +867,18 @@ describe("live quota", () => {
 				.mockReturnValueOnce(newPromise);
 
 			const old = runtime.quota(undefined);
-			await runtime.logout();
-			const fresh = runtime.quota(undefined);
+			if (change === "logout") await runtime.logout();
+			const nextKey = change === "credential change" ? "new-key" : undefined;
+			const fresh = runtime.quota(nextKey);
 			resolveOld({ at: 1, groups: [] });
 			await old;
-			const third = runtime.quota(undefined);
+			const third = runtime.quota(nextKey);
 			resolveNew({ at: 2, groups: [{ displayName: "fresh", buckets: [] }] });
 
 			expect((await fresh).at).toBe(2);
 			expect((await third).at).toBe(2);
 			expect(fetchQuota).toHaveBeenCalledTimes(2);
-			expect((runtime as unknown as { quotaCache?: AntigravityQuotaSnapshot }).quotaCache?.at).toBe(2);
+			expect((runtime as unknown as { quotaCache?: { snapshot: AntigravityQuotaSnapshot } }).quotaCache?.snapshot.at).toBe(2);
 		} finally {
 			vi.unstubAllEnvs();
 		}
@@ -887,12 +888,12 @@ describe("live quota", () => {
 describe("throwaway conversations", () => {
 	const userSid = "0f8fad5b-d9cb-469f-a165-70867728950e";
 	function conversationsIn(root: string, sids: "uuid" | "plain" = "uuid") {
-		const acp = path.join(root, "gemini", "antigravity-acp");
+		vi.stubEnv("PI_CODING_AGENT_DIR", root);
+		const acp = path.join(root, "antigravity-acp-provider", "gemini", "antigravity-acp");
 		const conversations = path.join(acp, "conversations");
 		fs.mkdirSync(conversations, { recursive: true });
 		for (const suffix of [".db", ".db-shm", ".db-wal", ".meta"]) fs.writeFileSync(path.join(conversations, userSid + suffix), "user");
 		fs.writeFileSync(path.join(acp, "acp_token.json"), "{}");
-		vi.stubEnv("GEMINI_HOME", path.join(root, "gemini"));
 		vi.stubEnv("FAKE_AGENT_CONVERSATIONS", sids);
 		return {
 			files: () => fs.readdirSync(conversations).sort(),
