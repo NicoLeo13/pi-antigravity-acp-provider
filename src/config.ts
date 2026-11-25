@@ -10,6 +10,7 @@ export interface AntigravityAcpConfig {
 	permissions: PermissionMode;
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
+	nativeWorkflows: boolean;
 }
 
 export function resolvePiAgentDir(): string {
@@ -58,16 +59,18 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			permissions?: unknown;
 			runtimeUpdates?: unknown;
 			toolActivity?: unknown;
+			nativeWorkflows?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
+			nativeWorkflows: parsed.nativeWorkflows === true,
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact" };
+	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", nativeWorkflows: false };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {

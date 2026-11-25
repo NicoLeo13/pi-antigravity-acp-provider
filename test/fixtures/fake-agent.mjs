@@ -49,7 +49,7 @@ for await (const line of rl) {
 	}
 	const { id, method, params } = message;
 	if (process.env.FAKE_AGENT_LOG_FILE && method) fs.appendFileSync(process.env.FAKE_AGENT_LOG_FILE,
-		JSON.stringify({ method, ...(method === "initialize" ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
+		JSON.stringify({ method, ...(["initialize", "session/new", "session/load", "session/resume"].includes(method) ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
 	if (id === "mixed-permission" && method === undefined) {
 		resolveMixedPermission?.(message.result?.outcome?.optionId ?? message.result?.outcome?.outcome ?? "cancelled");
 		resolveMixedPermission = undefined;
@@ -167,7 +167,8 @@ for await (const line of rl) {
 			for (const suffix of [".db", ".db-shm", ".db-wal"]) fs.writeFileSync(path.join(conversations, sessionId + suffix), "");
 			fs.writeFileSync(path.join(conversations, `${sessionId}.meta`), JSON.stringify({ cwd: params.cwd }));
 		}
-		if (process.env.FAKE_AGENT_WRITE_RUN_WORKFLOW === "1" && params.cwd) {
+		if (process.env.FAKE_AGENT_WRITE_RUN_WORKFLOW === "1" && params.cwd &&
+			!params._meta?.antigravity?.disabledTools?.includes("run_workflow")) {
 			const skillDir = path.join(params.cwd, "skills", "system", "run-workflow");
 			const skillFile = path.join(skillDir, "SKILL.md");
 			if (!fs.existsSync(skillFile)) {

@@ -15,6 +15,7 @@ import {
 } from "@agentclientprotocol/sdk/unstable";
 
 import { PACKAGE_VERSION } from "../constants.js";
+import { loadConfig } from "../config.js";
 import { boundedNdjsonStream } from "./bounded-stream.js";
 import { abortError, AntigravityAcpError, redact } from "./errors.js";
 import { AntigravityProcess, type AntigravityProcessOptions } from "./process.js";
@@ -38,6 +39,7 @@ export interface AntigravityConnectionHandlers {
 
 export interface AntigravityConnectionOptions extends AntigravityProcessOptions {
 	handlers?: AntigravityConnectionHandlers;
+	nativeWorkflows?: boolean;
 	initializeTimeoutMs?: number;
 	operationTimeoutMs?: number;
 	/** No inbound progress while the model is idle (default 10 minutes). */
@@ -51,6 +53,7 @@ export class AntigravityAcpConnection {
 	readonly process: AntigravityProcess;
 	readonly initialized: Promise<InitializeResponse>;
 	private readonly connection: ClientConnection;
+	private readonly nativeWorkflows: boolean;
 	private readonly operationTimeoutMs: number;
 	private readonly promptIdleTimeoutMs: number;
 	private readonly promptWorkIdleTimeoutMs: number;
@@ -64,6 +67,7 @@ export class AntigravityAcpConnection {
 
 	constructor(options: AntigravityConnectionOptions) {
 		this.handlers = options.handlers ?? {};
+		this.nativeWorkflows = options.nativeWorkflows ?? loadConfig().nativeWorkflows;
 		this.operationTimeoutMs = options.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
 		this.promptIdleTimeoutMs = options.promptIdleTimeoutMs ?? 10 * 60_000;
 		this.promptWorkIdleTimeoutMs = options.promptWorkIdleTimeoutMs ?? 60 * 60_000;
@@ -174,6 +178,13 @@ export class AntigravityAcpConnection {
 		);
 	}
 
+	private sessionToolMetadata() {
+		// run_workflow materializes its built-in skill into the workspace. Use the
+		// server's tool filter rather than deleting files or changing the session cwd.
+		// An explicit empty filter also clears a filter persisted by an older session.
+		return { antigravity: { disabledTools: this.nativeWorkflows ? [] : ["run_workflow"] } };
+	}
+
 	async newSession(
 		cwd: string,
 		signal?: AbortSignal,
@@ -182,7 +193,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.new, { cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.new, { cwd, mcpServers, _meta: this.sessionToolMetadata() }),
 				this.operationTimeoutMs,
 				"session/new",
 			),
@@ -205,7 +216,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.load, { sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.load, { sessionId, cwd, mcpServers, _meta: this.sessionToolMetadata() }),
 				this.operationTimeoutMs,
 				"session/load",
 			),
@@ -223,7 +234,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.resume, { sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.resume, { sessionId, cwd, mcpServers, _meta: this.sessionToolMetadata() }),
 				this.operationTimeoutMs,
 				"session/resume",
 			),
