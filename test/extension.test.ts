@@ -88,6 +88,20 @@ describe("extension entry point", () => {
 		expect([...pi.commands.keys()]).toEqual(["antigravity-acp", "gemini-acp"]);
 	});
 
+	it("completes arguments on the existing commands without opening an ACP connection", async () => {
+		const { pi, ctx } = await load("parent");
+		for (const name of ["antigravity-acp", "gemini-acp"]) {
+			const complete = pi.commands.get(name)!.getArgumentCompletions!;
+			expect(await complete("tool-activity f")).toEqual([{ value: "tool-activity full", label: "full" }]);
+			expect(await complete("doctor --v")).toEqual([{ value: "doctor --verbose", label: "--verbose" }]);
+		}
+		expect([...pi.commands.keys()]).toEqual(["antigravity-acp", "gemini-acp"]);
+		expect(connections).toHaveLength(0);
+		const items = (await pi.commands.get("antigravity-acp")!.getArgumentCompletions!("tool-activity o"))!;
+		await pi.commands.get("antigravity-acp")!.handler(items[0]!.value, ctx as never);
+		expect(ctx.ui.notify).toHaveBeenCalledWith("Antigravity tool activity: off", "info");
+	});
+
 	it("does not open an ACP quota session after Pi logout", async () => {
 		const { pi, ctx } = await load("parent");
 		ctx.modelRegistry.getApiKeyForProvider.mockResolvedValue(undefined);

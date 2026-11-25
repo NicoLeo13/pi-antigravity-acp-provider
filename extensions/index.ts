@@ -40,6 +40,7 @@ import {
 } from "../src/runtime.js";
 import { acquireSharedRuntime, releaseSharedRuntime } from "../src/shared-runtime.js";
 import { runSetupWizard } from "../src/wizard.js";
+import { completeAntigravityArguments } from "./command-completions.js";
 
 export type { AntigravityQuotaSnapshot } from "../src/acp/usage-quota.js";
 
@@ -122,6 +123,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 
 	const commandDefinition = {
 		description: "Set up, inspect, update, or configure Google Antigravity ACP",
+		getArgumentCompletions: completeAntigravityArguments,
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const command = args.trim() || "doctor";
 			if (command === "setup") {
