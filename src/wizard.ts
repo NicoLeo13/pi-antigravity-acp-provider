@@ -1,58 +1,25 @@
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
-import { inspectAntigravityAuth, resolveAntigravityAcpDirectory } from "./acp/antigravity.js";
+import { errorMessage } from "./acp/errors.js";
 import { ensureAntigravityAcpReady, inspectRuntimeSetup } from "./acp/setup.js";
-import { MANAGED_AUTH_MARKER } from "./constants.js";
 import { savePermissionMode, type PermissionMode } from "./config.js";
+import { PROVIDER_ID } from "./models.js";
 import type { AntigravityRuntime } from "./runtime.js";
 
-/** Which account the wizard inspects and signs in. Omitted for the legacy
- * default flow, which keeps using the ambient environment. */
-export interface SetupWizardAccount {
-	name: string;
-	env?: NodeJS.ProcessEnv;
-}
-
 export async function runSetupWizard(
-	ui: ExtensionUIContext,
+	{ ui, modelRegistry }: ExtensionCommandContext,
 	runtime: AntigravityRuntime,
-	account?: SetupWizardAccount,
 ): Promise<void> {
 	ui.notify("Checking Antigravity ACP runtime…", "info");
 	await ensureAntigravityAcpReady((message) => ui.notify(message, "info"));
 	const setup = inspectRuntimeSetup();
-	const env = account?.env ?? process.env;
-	const directory = resolveAntigravityAcpDirectory(env);
-	let localAuth = inspectAntigravityAuth(directory, env);
-	if (localAuth.status !== "oauth-refreshable" && localAuth.status !== "api-key-env") {
-		const loginNow = await ui.confirm(
-			"Antigravity authentication",
-			"Sign in with Google now? Choose No to use Pi's /login API-key flow later.",
+	const apiKey = await modelRegistry.getApiKeyForProvider(PROVIDER_ID).catch(() => undefined);
+	if (!apiKey) {
+		ui.notify(
+			`Runtime ${setup.installedVersion ?? setup.approvedVersion} ready. Run /login antigravity-acp to sign in before validating it.`,
+			"warning",
 		);
-		if (!loginNow) {
-			ui.notify(
-				`Runtime ${setup.installedVersion ?? setup.approvedVersion} ready at ${setup.launch?.command ?? "unknown path"}. Run /login and choose ${account?.name ?? "Google Antigravity (ACP)"} when ready.`,
-				"warning",
-			);
-			return;
-		}
-		await runtime.loginGoogle(
-			undefined,
-			(message) => ui.notify(message, "info"),
-			{
-				showAuthorizationUrl: (url, instructions) => ui.notify(`${instructions}\n${url}`, "info"),
-				promptForCallback: async (signal) => {
-					const value = await ui.input(
-						"Paste the final localhost callback URL (or authorization code)",
-						"http://127.0.0.1:PORT/?state=…&code=…",
-						{ signal },
-					);
-					if (!value) throw new Error("Antigravity OAuth login cancelled");
-					return value;
-				},
-			},
-		);
-		localAuth = inspectAntigravityAuth(directory, env);
+		return;
 	}
 
 	const selectedMode = await ui.select("Default Antigravity permission mode", [
@@ -69,20 +36,20 @@ export async function runSetupWizard(
 	}
 
 	ui.notify("Validating authentication and discovering models…", "info");
-	const apiKey = localAuth.status === "api-key-env" ? env.GEMINI_API_KEY : MANAGED_AUTH_MARKER;
-	const health = await runtime.authHealth(apiKey);
-	if (!health.networkValid) {
-		ui.notify(`Antigravity authentication probe failed: ${health.error ?? "unknown error"}`, "error");
+	let modelCount: number;
+	try {
+		modelCount = (await runtime.discoverModels(apiKey)).length;
+	} catch (error) {
+		ui.notify(`Antigravity authentication probe failed: ${errorMessage(error)}`, "error");
 		return;
 	}
-	const models = await runtime.discoverModels(apiKey);
 	const runtimeStatus = await runtime.snapshot();
 	ui.notify(
 		[
 			"Antigravity ACP setup complete.",
 			`Runtime: ${setup.installedVersion ?? setup.approvedVersion} (${setup.platform})`,
-			`Authentication: valid ${localAuth.authType ?? localAuth.status}`,
-			`Models discovered: ${models.length}`,
+			"Authentication: valid",
+			`Models discovered: ${modelCount}`,
 			`Permission mode: ${runtimeStatus.permissionMode.replace("_", "-")}.`,
 		].join("\n"),
 		"info",

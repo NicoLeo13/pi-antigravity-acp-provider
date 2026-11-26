@@ -22,27 +22,28 @@ import {
 	clearAntigravityCredentials,
 	inspectAntigravityAuth,
 	removeConversation,
-	resolveAntigravityAcpDirectory,
 	type AntigravityAuthHealth,
 } from "./acp/antigravity.js";
 import { AntigravityAcpConnection, type AntigravityConnectionOptions } from "./acp/connection.js";
+import { providerAcpDirectory, providerAcpEnvironment } from "./acp/credential-storage.js";
 import { abortError, AntigravityAcpError, errorMessage } from "./acp/errors.js";
 import { quotaExhaustion } from "./acp/quota.js";
+import { confirmsPermissionMode, permissionModeId, unsupportedPermissionMode } from "./acp/permission-policy.js";
+import { canonicalJson } from "./acp/runtime-manifest.js";
 import { AcpSessionStore } from "./acp/session-store.js";
-import { sessionModels, sessionModes, type AcpModelInfo, type AcpNewSessionResponse, type SessionState } from "./acp/session-state.js";
+import { sessionModels, sessionModes, type AcpModelInfo, type AcpNewSessionResponse } from "./acp/session-state.js";
 import { parseUsageQuota, type AntigravityQuotaSnapshot } from "./acp/usage-quota.js";
 import {
 	DEFAULT_BINDING_IDLE_MS,
 	DEFAULT_MAX_BINDINGS,
-	MANAGED_AUTH_MARKER,
 	PERMISSION_RESULT_KIND,
 	PERMISSION_TOOL_NAME,
 } from "./constants.js";
 export { MANAGED_AUTH_MARKER, PERMISSION_RESULT_KIND, PERMISSION_TOOL_NAME } from "./constants.js";
 import { mapSessionUpdate } from "./acp/events.js";
+import { credentialIdentity, hasSavedGoogleLogin, isGoogleLoginMarker } from "./auth.js";
 import { ensureAntigravityAcpReady } from "./acp/setup.js";
 import { HeadlessOAuthRelay, shouldUseHeadlessOAuth } from "./acp/headless-oauth.js";
-import { applyIsolatedGeminiEnvironment } from "./acp/isolated-home.js";
 import {
 	PiMcpBridge,
 	piToolFingerprint,
@@ -50,7 +51,7 @@ import {
 	type ToolOmission,
 	type PiToolInvocation,
 } from "./mcp/bridge.js";
-import type { PermissionMode, ToolActivityMode, ToolBridgeMode } from "./config.js";
+import { resolveUtilityCwd, type PermissionMode, type ToolActivityMode } from "./config.js";
 import { resolveAcpModelId } from "./models.js";
 import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
@@ -79,11 +80,14 @@ interface PendingPiTool {
 
 interface Binding {
 	key: string;
+	credentialId: string;
 	cwd: string;
 	connection: AntigravityAcpConnection;
 	initialize: InitializeResponse;
 	session: AcpNewSessionResponse;
 	mode: PermissionMode;
+	modeId: string;
+	pendingMode?: { mode: PermissionMode; modeId: string } | undefined;
 	instructionsFingerprint: string | undefined;
 	needsReconstruction: boolean;
 	modelId: string;
@@ -132,19 +136,12 @@ export interface AntigravityRuntimeOptions {
 	maxBindings?: number;
 	idleMs?: number;
 	toolActivityMode?: ToolActivityMode;
-	toolBridgeMode?: ToolBridgeMode;
-	isolatedGeminiHome?: boolean;
-	/** Base environment for every agy process this runtime spawns and for local
-	 * credential inspection. A per-account home (`GEMINI_HOME`) belongs here. */
-	env?: NodeJS.ProcessEnv;
 }
 
 export interface RuntimeSnapshot {
 	bindings: number;
 	permissionMode: PermissionMode;
 	toolActivityMode: ToolActivityMode;
-	toolBridgeMode: ToolBridgeMode;
-	isolatedGeminiHome: boolean;
 	metrics: ReturnType<RuntimeMetrics["snapshot"]>;
 	processes: Array<{
 		key: string;
@@ -153,6 +150,7 @@ export interface RuntimeSnapshot {
 		sessionId: string;
 		modelId: string;
 		confirmedPermissionMode: PermissionMode;
+		confirmedAcpModeId: string;
 		omittedTools: ToolOmission[];
 		alive: boolean;
 		waitingForPermission: boolean;
@@ -162,6 +160,7 @@ export interface RuntimeSnapshot {
 		restored: boolean;
 		ignoredStdoutNoiseLines: number;
 		stderrTail?: string;
+		diagnosticsPath?: string;
 	}>;
 }
 
@@ -173,6 +172,7 @@ export class AntigravityRuntime {
 	private readonly bindingPromises = new WeakMap<Binding, Promise<Binding>>();
 	private disposed = false;
 	private closePromise: Promise<void> | undefined;
+	private logoutInFlight: Promise<void> | undefined;
 	private bindingEpoch = 0;
 	private readonly sessionEpochs = new Map<string, number>();
 	private readonly busyKeys = new Map<string, number>();
@@ -191,11 +191,8 @@ export class AntigravityRuntime {
 	private readonly metrics = new RuntimeMetrics();
 	private permissionMode: PermissionMode;
 	private toolActivityMode: ToolActivityMode;
-	private toolBridgeMode: ToolBridgeMode;
-	private isolatedGeminiHome: boolean;
-	private readonly baseEnv: NodeJS.ProcessEnv | undefined;
-	private quotaCache: AntigravityQuotaSnapshot | undefined;
-	private quotaInFlight: { epoch: number; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
+	private quotaCache: { credentialId: string; snapshot: AntigravityQuotaSnapshot } | undefined;
+	private quotaInFlight: { epoch: number; credentialId: string; snapshot: Promise<AntigravityQuotaSnapshot> } | undefined;
 
 	constructor(
 		connectionFactory?: AntigravityConnectionFactory,
@@ -207,9 +204,6 @@ export class AntigravityRuntime {
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
 		this.toolActivityMode = options?.toolActivityMode ?? "compact";
-		this.toolBridgeMode = options?.toolBridgeMode ?? "all";
-		this.isolatedGeminiHome = options?.isolatedGeminiHome ?? false;
-		this.baseEnv = options?.env;
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);
@@ -227,6 +221,8 @@ export class AntigravityRuntime {
 				tools: getCurrentTools(transcript.messages),
 			};
 			currentSystemInstructions(resolvedContext);
+			if (options.signal?.aborted) throw abortError();
+			writer.start();
 			void this.runQueued(model, resolvedContext, options, writer)
 				.then(() => {
 					if (!writer.finished) {
@@ -252,8 +248,8 @@ export class AntigravityRuntime {
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
 		if (signal?.aborted) throw abortError();
 		this.assertEpoch(epoch);
-		const cwd = process.cwd();
-		const connection = this.createConnection({ cwd });
+		const cwd = resolveUtilityCwd();
+		const connection = this.createConnection({ cwd }, apiKey);
 		try {
 			const initialize = await connection.initialize(signal);
 			this.assertEpoch(epoch);
@@ -271,14 +267,18 @@ export class AntigravityRuntime {
 	async quota(apiKey: string | undefined, signal?: AbortSignal): Promise<AntigravityQuotaSnapshot> {
 		this.assertActive();
 		if (signal?.aborted) throw abortError();
-		if (this.quotaCache && Date.now() - this.quotaCache.at < QUOTA_CACHE_MS) return this.quotaCache;
+		const credentialId = credentialIdentity(apiKey);
+		if (this.quotaCache?.credentialId === credentialId && Date.now() - this.quotaCache.snapshot.at < QUOTA_CACHE_MS) {
+			return this.quotaCache.snapshot;
+		}
 		const epoch = this.bindingEpoch;
-		if (this.quotaInFlight?.epoch !== epoch) {
+		if (this.quotaInFlight?.epoch !== epoch || this.quotaInFlight.credentialId !== credentialId) {
 			const request = {
 				epoch,
+				credentialId,
 				snapshot: this.fetchQuota(apiKey)
 					.then((snapshot) => {
-						if (this.bindingEpoch === epoch) this.quotaCache = snapshot;
+						if (this.bindingEpoch === epoch && this.quotaInFlight === request) this.quotaCache = { credentialId, snapshot };
 						return snapshot;
 					})
 					.finally(() => { if (this.quotaInFlight === request) this.quotaInFlight = undefined; }),
@@ -303,7 +303,7 @@ export class AntigravityRuntime {
 		this.assertEpoch(epoch);
 		let sessionId: string | undefined;
 		let text = "";
-		const cwd = process.cwd();
+		const cwd = resolveUtilityCwd();
 		const connection = this.createConnection({
 			cwd,
 			promptIdleTimeoutMs: QUOTA_TIMEOUT_MS,
@@ -313,7 +313,7 @@ export class AntigravityRuntime {
 				},
 				onPermission: async () => ({ outcome: { outcome: "cancelled" } }),
 			},
-		});
+		}, apiKey);
 		try {
 			const initialize = await connection.initialize();
 			this.assertEpoch(epoch);
@@ -327,7 +327,7 @@ export class AntigravityRuntime {
 		} finally {
 			await connection.close();
 			// agy keeps no index and offers no delete RPC; remove the files only once the process is gone (close() can give up on a process that ignored SIGKILL).
-			if (sessionId && !connection.process.alive) removeConversation(sessionId, resolveAntigravityAcpDirectory(this.baseEnv ?? process.env));
+			if (sessionId && !connection.process.alive) removeConversation(sessionId, providerAcpDirectory());
 		}
 	}
 
@@ -337,19 +337,25 @@ export class AntigravityRuntime {
 		manualInteraction?: ManualGoogleLoginInteraction,
 	): Promise<void> {
 		this.assertActive();
+		signal?.throwIfAborted();
 		const epoch = this.bindingEpoch;
-		if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
-		this.assertEpoch(epoch);
+		const env = { ...process.env };
+		delete env.GEMINI_API_KEY;
 		const useManualOAuth = manualInteraction !== undefined && shouldUseHeadlessOAuth();
-		const relay = useManualOAuth ? new HeadlessOAuthRelay(this.baseEnv ?? process.env) : undefined;
-		const cwd = process.cwd();
-		const connection = this.createConnection({
-			cwd,
-			...(relay ? { env: relay.env } : {}),
-		});
+		const relay = useManualOAuth ? new HeadlessOAuthRelay(env) : undefined;
+		let connection: AntigravityAcpConnection | undefined;
 		try {
-			const initialize = await connection.initialize();
+			if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
 			this.assertEpoch(epoch);
+			signal?.throwIfAborted();
+			// An explicit /login must not authenticate by silently reusing the old account.
+			await this.logout();
+			signal?.throwIfAborted();
+			const loginEpoch = this.bindingEpoch;
+			const cwd = resolveUtilityCwd();
+			connection = this.createConnection({ cwd, env: relay?.env ?? env });
+			const initialize = await connection.initialize(signal);
+			this.assertEpoch(loginEpoch);
 			const method = initialize.authMethods?.find((candidate) =>
 				/log\s*in\s+with\s+google|google\s+account|oauth-personal/iu.test(
 					`${candidate.id} ${candidate.name}`,
@@ -364,9 +370,7 @@ export class AntigravityRuntime {
 			void authentication.catch(() => undefined);
 			if (relay && manualInteraction) {
 				const captured = await raceAuthentication(relay.waitForAuthorization(signal), authentication);
-				if (captured.authenticated) {
-					onProgress?.("Antigravity reused the saved Google login.");
-				} else {
+				if (!captured.authenticated) {
 					const instructions =
 						"Open this URL in a browser on your local machine. After Google redirects to localhost, the page may fail to load; copy the complete localhost URL from the browser address bar and paste it below.";
 					manualInteraction.showAuthorizationUrl(captured.value.url, instructions);
@@ -389,12 +393,15 @@ export class AntigravityRuntime {
 				}
 			}
 			await authentication;
-			this.assertEpoch(epoch);
+			this.assertEpoch(loginEpoch);
 			await connection.newSession(cwd, signal);
-			this.assertEpoch(epoch);
+			this.assertEpoch(loginEpoch);
+			if (!hasSavedGoogleLogin()) {
+				throw new AntigravityAcpError("auth", "Antigravity did not save a Google login for this Pi profile");
+			}
 		} finally {
 			relay?.dispose();
-			await connection.close();
+			await connection?.close();
 		}
 	}
 
@@ -407,7 +414,7 @@ export class AntigravityRuntime {
 		const epoch = this.bindingEpoch;
 		if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
 		this.assertEpoch(epoch);
-		const cwd = process.cwd();
+		const cwd = resolveUtilityCwd();
 		const connection = this.createConnection({ cwd });
 		try {
 			const initialize = await connection.initialize();
@@ -421,33 +428,21 @@ export class AntigravityRuntime {
 		}
 	}
 
-	/** Local credential presence in this runtime's own home. Provider auth
-	 * checks must use this instead of the ambient home, or a second account
-	 * would appear configured because the default account is logged in. */
-	hasLocalAuth(): boolean {
-		return hasUsableLocalAuth(this.inspectLocalAuth());
+	inspectLocalAuth(): AntigravityAuthHealth {
+		return inspectAntigravityAuth(providerAcpDirectory());
 	}
 
-	private inspectLocalAuth(): AntigravityAuthHealth {
-		const env = this.baseEnv ?? process.env;
-		return inspectAntigravityAuth(resolveAntigravityAcpDirectory(env), env);
+	logout(): Promise<void> {
+		return this.logoutInFlight ??= this.resetAuthentication().finally(() => {
+			this.logoutInFlight = undefined;
+		});
 	}
 
-	async authHealth(apiKey?: string): Promise<AntigravityAuthHealth & { networkValid?: boolean; error?: string }> {
-		const local = this.inspectLocalAuth();
-		try {
-			await this.discoverModels(apiKey ?? (hasUsableLocalAuth(local) ? MANAGED_AUTH_MARKER : undefined));
-			return { ...local, networkValid: true };
-		} catch (error) {
-			return { ...local, networkValid: false, error: errorMessage(error) };
-		}
-	}
-
-	async logout(): Promise<void> {
-		await this.closeBindings();
+	private async resetAuthentication(): Promise<void> {
 		this.quotaCache = undefined;
+		await this.closeBindings();
+		clearAntigravityCredentials(providerAcpDirectory());
 		this.sessionStore?.clear();
-		clearAntigravityCredentials(resolveAntigravityAcpDirectory(this.baseEnv ?? process.env));
 	}
 
 	setPermissionMode(mode: PermissionMode): Promise<void> {
@@ -457,11 +452,22 @@ export class AntigravityRuntime {
 			await Promise.all([...this.resolvedBindings].map(async (binding) => {
 				if (binding.mode === mode && this.confirmedMode(binding) === mode) return;
 				// Never change policy under an executing turn or leave an unsupported session alive.
-				if (!binding.turnCompletion && supportsMode(binding.connection.getSessionState(binding.session.sessionId), mode)) {
+				const modeId = permissionModeId(binding.connection.getSessionState(binding.session.sessionId), mode);
+				if (!binding.turnCompletion && modeId !== undefined) {
+					binding.pendingMode = { mode, modeId };
 					try {
-						await binding.connection.setMode(binding.session.sessionId, mode);
-						if (this.confirmedMode(binding) === mode) { binding.mode = mode; return; }
+						await binding.connection.setMode(binding.session.sessionId, modeId);
+						if (this.resolvedBindings.has(binding) && confirmsPermissionMode(binding.connection.getSessionState(binding.session.sessionId), mode, modeId)) {
+							binding.mode = mode;
+							binding.modeId = modeId;
+							return;
+						}
 					} catch { /* Close below; the next turn must negotiate again. */ }
+					finally {
+						if (binding.pendingMode?.mode === mode && binding.pendingMode.modeId === modeId) {
+							binding.pendingMode = undefined;
+						}
+					}
 				}
 				await this.invalidateBinding(binding);
 			}));
@@ -472,14 +478,6 @@ export class AntigravityRuntime {
 
 	setToolActivityMode(mode: ToolActivityMode): void {
 		this.toolActivityMode = mode;
-	}
-
-	setToolBridgeMode(mode: ToolBridgeMode): void {
-		this.toolBridgeMode = mode;
-	}
-
-	setIsolatedGeminiHome(enabled: boolean): void {
-		this.isolatedGeminiHome = enabled;
 	}
 
 	getPermission(requestId: string): PermissionView | undefined {
@@ -502,6 +500,7 @@ export class AntigravityRuntime {
 					sessionId: binding.session.sessionId,
 					modelId: binding.modelId,
 					confirmedPermissionMode: binding.mode,
+					confirmedAcpModeId: binding.modeId,
 					omittedTools: binding.omittedTools,
 					alive: binding.connection.process.alive,
 					waitingForPermission: binding.permission !== undefined,
@@ -511,6 +510,7 @@ export class AntigravityRuntime {
 					restored: binding.restored,
 					ignoredStdoutNoiseLines: binding.connection.process.ignoredStdoutNoiseLines,
 					...(includeStderr ? { stderrTail: binding.connection.process.stderrTail } : {}),
+					...(binding.connection.diagnosticsPath ? { diagnosticsPath: binding.connection.diagnosticsPath } : {}),
 				};
 			}),
 		);
@@ -518,8 +518,6 @@ export class AntigravityRuntime {
 			bindings: processes.length,
 			permissionMode: this.permissionMode,
 			toolActivityMode: this.toolActivityMode,
-			toolBridgeMode: this.toolBridgeMode,
-			isolatedGeminiHome: this.isolatedGeminiHome,
 			metrics: this.metrics.snapshot(),
 			processes,
 		};
@@ -600,7 +598,7 @@ export class AntigravityRuntime {
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			// Check before continuation early returns as well as before fresh prompts.
 			if (binding.mode !== this.permissionMode || this.confirmedMode(binding) !== this.permissionMode ||
-				binding.toolFingerprint !== piToolFingerprint(tools, this.toolBridgeMode)) {
+				binding.toolFingerprint !== piToolFingerprint(tools)) {
 				await this.invalidateBinding(binding);
 				this.assertSessionEpoch(key, epoch, sessionEpoch);
 				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
@@ -610,57 +608,22 @@ export class AntigravityRuntime {
 				binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
 			}
 
-			// A permission tool result resumes the still-running ACP prompt rather than
-			// starting a second Antigravity turn.
-			if (binding.permission && !binding.turnCompletion) {
-				cancelPermission(binding);
+			// Permission and Pi tool results resume the still-running ACP prompt rather than
+			// starting a second Antigravity turn. One inference can raise a pi-bridge call and a
+			// permission request together; Pi answers both in one continuation, so resolve both.
+			if (!binding.turnCompletion) {
+				if (binding.permission) cancelPermission(binding);
+				if (binding.pendingTools.size > 0) cancelPiTools(binding, "Antigravity turn ended before Pi returned the tool result");
 			}
-			if (binding.permission) {
-				const pending = binding.permission;
-				const result = findPermissionResult(context, pending.id);
-				if (!result) {
-					cancelPermission(binding);
-					await this.dropBinding(key, binding);
-					this.assertSessionEpoch(key, epoch, sessionEpoch);
-					binding = await this.getBinding(key, model, acpModelId, options.apiKey, writer, tools, options.signal);
-				} else {
-					binding.writer = writer;
-					this.touchBinding(binding);
-					this.noteContinuationInstructions(binding, context);
-					binding.pendingContextCount = context.messages.length;
-					binding.pendingContextFingerprint = messagesFingerprint(context.messages);
-					this.commitProgress(binding);
-					binding.permission = undefined;
-					clearTimeout(pending.timer);
-					if (
-						!result.cancelled &&
-						result.optionId &&
-						pending.request.options.some((option) => option.optionId === result.optionId)
-					) {
-						pending.resolve({ outcome: { outcome: "selected", optionId: result.optionId } });
-					} else {
-						pending.resolve({ outcome: { outcome: "cancelled" } });
-					}
-					await this.awaitContinuation(binding, options.signal);
-					if (!writer.finished) {
-						writer.fail(
-							new AntigravityAcpError("protocol", "Antigravity ACP permission continuation ended without completing the response"),
-							options.signal?.aborted === true,
-						);
-					}
-					return;
-				}
-			}
-
-			if (binding.pendingTools.size > 0 && !binding.turnCompletion) {
-				cancelPiTools(binding, "Antigravity turn ended before Pi returned the tool result");
-			}
-			if (binding.pendingTools.size > 0) {
+			if (binding.permission || binding.pendingTools.size > 0) {
+				const permission = binding.permission;
+				const permissionResult = permission ? findPermissionResult(context, permission.id) : undefined;
 				const results = [...binding.pendingTools.values()].map((pending) => ({
 					pending,
 					message: findToolResult(context, pending.invocation.id, pending.invocation.name),
 				}));
-				if (results.some((result) => result.message === undefined)) {
+				if ((permission && !permissionResult) || results.some((result) => result.message === undefined)) {
+					cancelPermission(binding);
 					cancelPiTools(binding, "Pi continued without returning every requested tool result");
 					await this.dropBinding(key, binding);
 					this.assertSessionEpoch(key, epoch, sessionEpoch);
@@ -676,10 +639,25 @@ export class AntigravityRuntime {
 						binding.pendingTools.delete(pending.invocation.id);
 						pending.resolve(toMcpToolResult(message as ToolResultMessage));
 					}
+					if (permission && permissionResult) {
+						binding.permission = undefined;
+						clearTimeout(permission.timer);
+						if (
+							!permissionResult.cancelled &&
+							permissionResult.optionId &&
+							permission.request.options.some((option) => option.optionId === permissionResult.optionId)
+						) {
+							permission.resolve({ outcome: { outcome: "selected", optionId: permissionResult.optionId } });
+						} else {
+							permission.resolve({ outcome: { outcome: "cancelled" } });
+						}
+					}
 					await this.awaitContinuation(binding, options.signal);
 					if (!writer.finished) {
 						writer.fail(
-							new AntigravityAcpError("protocol", "Antigravity ACP tool continuation ended without completing the response"),
+							new AntigravityAcpError("protocol", permission
+								? "Antigravity ACP permission continuation ended without completing the response"
+								: "Antigravity ACP tool continuation ended without completing the response"),
 							options.signal?.aborted === true,
 						);
 					}
@@ -703,7 +681,7 @@ export class AntigravityRuntime {
 				if (
 					binding.needsReconstruction || binding.mode !== this.permissionMode ||
 					this.confirmedMode(binding) !== this.permissionMode ||
-					binding.toolFingerprint !== piToolFingerprint(tools, this.toolBridgeMode) ||
+					binding.toolFingerprint !== piToolFingerprint(tools) ||
 					context.messages.length < binding.messageCount ||
 					messagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
 						binding.historyFingerprint
@@ -894,11 +872,16 @@ export class AntigravityRuntime {
 		tools: Context["tools"],
 		signal?: AbortSignal,
 	): Promise<Binding> {
+		const credentialId = credentialIdentity(apiKey);
 		for (;;) {
 			this.assertActive();
 			const existing = this.bindings.get(key);
 			if (!existing) break;
 			const resolved = await existing;
+			if (resolved.credentialId !== credentialId) {
+				await this.invalidateBinding(resolved);
+				continue;
+			}
 			if (!isConnectionDead(resolved.connection)) {
 				this.touchBinding(resolved);
 				return resolved;
@@ -909,7 +892,7 @@ export class AntigravityRuntime {
 		created = (async () => {
 			await this.evictForCapacity();
 			this.assertActive();
-			return this.createBinding(key, model, acpModelId, apiKey, writer, tools ?? [], created, signal);
+			return this.createBinding(key, model, acpModelId, apiKey, credentialId, writer, tools ?? [], created, signal);
 		})().catch((error) => {
 			if (this.bindings.get(key) === created) this.bindings.delete(key);
 			throw error;
@@ -923,6 +906,7 @@ export class AntigravityRuntime {
 		model: AntigravityModel,
 		acpModelId: string,
 		apiKey: string | undefined,
+		credentialId: string,
 		writer: PiEventWriter,
 		tools: NonNullable<Context["tools"]>,
 		entryPromise: Promise<Binding>,
@@ -939,20 +923,19 @@ export class AntigravityRuntime {
 				onUpdate: (notification) => this.consumeUpdate(binding, notification),
 				onPermission: (request) => this.requestPermission(binding, request),
 			},
-		});
+		}, apiKey);
 		try {
-			const initialize = await connection.initialize();
+			const initialize = await connection.initialize(signal);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const omittedTools = initialize.agentCapabilities?.mcpCapabilities?.http === true
-				? planToolProjection(tools, this.toolBridgeMode)
+				? planToolProjection(tools)
 				: tools.filter((tool) => tool.name !== PERMISSION_TOOL_NAME).map((tool) => ({ name: tool.name, reason: "Agent did not advertise MCP over HTTP" }));
 			let mcpServer;
 			if (tools.length > 0 && initialize.agentCapabilities?.mcpCapabilities?.http === true) {
 				bridge = new PiMcpBridge({
 					tools,
-					toolBridgeMode: this.toolBridgeMode,
 					onCall: (invocation) => this.requestPiTool(binding, invocation),
 				});
 				mcpServer = await bridge.start();
@@ -962,7 +945,7 @@ export class AntigravityRuntime {
 			const saved = piSessionId ? this.sessionStore?.get(piSessionId) : undefined;
 			let session: AcpNewSessionResponse | undefined;
 			let restored = false;
-			if (saved?.cwd === cwd) {
+			if (saved?.cwd === cwd && saved.credentialId === credentialId) {
 				if (initialize.agentCapabilities?.sessionCapabilities?.resume) {
 					try {
 						const resumed = await connection.resumeSession(saved.acpSessionId, cwd, mcpServers, signal);
@@ -985,12 +968,13 @@ export class AntigravityRuntime {
 			session ??= await connection.newSession(cwd, signal, mcpServers);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			const mode = this.permissionMode;
-			if (!supportsMode(session, mode)) {
+			const modeId = permissionModeId(session, mode);
+			if (modeId === undefined) {
 				if (piSessionId) this.sessionStore?.remove(piSessionId);
-				throw new AntigravityAcpError("protocol", `Antigravity ${restored ? "restored" : "new"} session did not advertise permission mode '${mode}'; refusing to prompt`);
+				throw new AntigravityAcpError("protocol", `Antigravity ${restored ? "restored" : "new"} session ${unsupportedPermissionMode(session, mode)}`);
 			}
-			if (sessionModes(session)?.currentModeId !== mode) await connection.setMode(session.sessionId, mode, signal);
-			if (sessionModes(connection.getSessionState(session.sessionId))?.currentModeId !== mode) {
+			if (sessionModes(session)?.currentModeId !== modeId) await connection.setMode(session.sessionId, modeId, signal);
+			if (!confirmsPermissionMode(connection.getSessionState(session.sessionId), mode, modeId)) {
 				throw new AntigravityAcpError("protocol", "Antigravity did not confirm the requested permission mode");
 			}
 			const currentModel = sessionModels(session)?.currentModelId;
@@ -999,11 +983,13 @@ export class AntigravityRuntime {
 			if (mode !== this.permissionMode) throw new AntigravityAcpError("protocol", "Permission mode changed during session setup; retry the turn");
 			const createdBinding: Binding = {
 				key,
+				credentialId,
 				cwd,
 				connection,
 				initialize,
 				session,
 				mode,
+				modeId,
 				instructionsFingerprint: undefined,
 				needsReconstruction: false,
 				modelId: acpModelId,
@@ -1019,7 +1005,7 @@ export class AntigravityRuntime {
 				inferences: 0,
 				toolBatchTimer: undefined,
 				bridge,
-				toolFingerprint: piToolFingerprint(tools, this.toolBridgeMode),
+				toolFingerprint: piToolFingerprint(tools),
 				omittedTools,
 				turnCompletion: undefined,
 				abortRequested: false,
@@ -1063,6 +1049,7 @@ export class AntigravityRuntime {
 			piSessionId: binding.piSessionId,
 			acpSessionId: binding.session.sessionId,
 			acpModelId: binding.modelId,
+			credentialId: binding.credentialId,
 			cwd: binding.cwd,
 			messageCount: binding.messageCount,
 			historyFingerprint: binding.historyFingerprint,
@@ -1077,7 +1064,8 @@ export class AntigravityRuntime {
 		binding: Binding | undefined,
 		invocation: PiToolInvocation,
 	): Promise<CallToolResult> {
-		if (!binding?.writer || binding.writer.finished || binding.permission || binding.abortRequested) {
+		const batchWriter = binding?.writer;
+		if (!binding || !batchWriter || batchWriter.finished || binding.permission || binding.abortRequested) {
 			return Promise.resolve({
 				content: [{ type: "text", text: "Pi cannot accept this tool call in the current turn" }],
 				isError: true,
@@ -1089,12 +1077,15 @@ export class AntigravityRuntime {
 				release = binding.connection.holdPromptWatchdog(binding.session.sessionId);
 				const held = release;
 				binding.pendingTools.set(invocation.id, { invocation, resolve: (result) => { held(); resolve(result); } });
-				binding.writer?.toolCall(invocation.id, invocation.name, invocation.arguments);
+				// End the slice that received this call; by the time the timer fires Pi may already
+				// be streaming the continuation through a newer writer.
+				batchWriter.toolCall(invocation.id, invocation.name, invocation.arguments);
 				if (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);
-				binding.toolBatchTimer = setTimeout(() => {
-					binding.toolBatchTimer = undefined;
-					binding.writer?.done("toolUse");
+				const batchTimer = setTimeout(() => {
+					if (binding.toolBatchTimer === batchTimer) binding.toolBatchTimer = undefined;
+					batchWriter.done("toolUse");
 				}, TOOL_BATCH_MS);
+				binding.toolBatchTimer = batchTimer;
 				binding.toolBatchTimer.unref();
 			} catch {
 				binding.pendingTools.delete(invocation.id);
@@ -1122,6 +1113,9 @@ export class AntigravityRuntime {
 			binding.permission = { id, request, resolve, timer };
 			try {
 				binding.writer?.toolCall(id, PERMISSION_TOOL_NAME, { requestId: id });
+				// This ends the slice, including any Pi tool calls still in the batching window.
+				if (binding.toolBatchTimer) clearTimeout(binding.toolBatchTimer);
+				binding.toolBatchTimer = undefined;
 				binding.writer?.done("toolUse");
 			} catch {
 				clearTimeout(timer);
@@ -1133,8 +1127,9 @@ export class AntigravityRuntime {
 
 	private consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {
 		if (!binding || notification.sessionId !== binding.session.sessionId) return;
+		const expected = binding.pendingMode ?? { mode: binding.mode, modeId: binding.modeId };
 		if ((notification.update.sessionUpdate === "config_option_update" || notification.update.sessionUpdate === "current_mode_update") &&
-			this.confirmedMode(binding) !== this.permissionMode) {
+			this.confirmedMode(binding, expected) !== this.permissionMode) {
 			binding.writer?.fail(new AntigravityAcpError("protocol", "Antigravity changed the permission mode unexpectedly; session closed"), false);
 			void this.invalidateBinding(binding).catch(() => undefined);
 			return;
@@ -1232,8 +1227,9 @@ export class AntigravityRuntime {
 		});
 	}
 
-	private confirmedMode(binding: Binding): string | undefined {
-		return sessionModes(binding.connection.getSessionState(binding.session.sessionId))?.currentModeId;
+	private confirmedMode(binding: Binding, expected = { mode: binding.mode, modeId: binding.modeId }): string | undefined {
+		return confirmsPermissionMode(binding.connection.getSessionState(binding.session.sessionId), expected.mode, expected.modeId)
+			? expected.mode : undefined;
 	}
 
 	private noteContinuationInstructions(binding: Binding, context: Context): void {
@@ -1250,23 +1246,12 @@ export class AntigravityRuntime {
 		await this.dropBinding(binding.key, binding, true);
 	}
 
-	private createConnection(options: AntigravityConnectionOptions): AntigravityAcpConnection {
+	private createConnection(options: AntigravityConnectionOptions, apiKey?: string): AntigravityAcpConnection {
 		this.assertActive();
-		// The account environment is the base for every spawn; a call may still
-		// layer its own values on top (the headless OAuth relay does exactly that).
-		const scoped: AntigravityConnectionOptions = this.baseEnv
-			? { ...options, env: options.env ? { ...this.baseEnv, ...options.env } : this.baseEnv }
-			: options;
-		// The isolated root is shared by every runtime in this process and its
-		// antigravity-acp symlink is repointed on demand, so an account that
-		// declares its own home must never use it: two accounts would flip one
-		// link and read each other's credentials. A declared home has no ambient
-		// GEMINI.md or skills to exclude either.
-		const isolate = this.isolatedGeminiHome && this.ensureAgent && !declaresHome(this.baseEnv);
-		const connectionOptions = isolate
-			? { ...scoped, env: applyIsolatedGeminiEnvironment(scoped.env) }
-			: scoped;
-		const connection = this.connectionFactory(connectionOptions);
+		if (this.logoutInFlight) throw new AntigravityAcpError("auth", "Antigravity ACP logout is in progress");
+		const env = providerAcpEnvironment(options.env);
+		if (apiKey && isGoogleLoginMarker(apiKey)) delete env.GEMINI_API_KEY;
+		const connection = this.connectionFactory({ ...options, env });
 		this.activeConnections.add(connection);
 		void connection.process.exited.then(() => this.activeConnections.delete(connection)).catch(() => undefined);
 		return connection;
@@ -1319,7 +1304,7 @@ async function authenticateForCredential(
 	apiKey: string | undefined,
 	signal?: AbortSignal,
 ): Promise<void> {
-	if (!apiKey || apiKey === MANAGED_AUTH_MARKER) return;
+	if (!apiKey || isGoogleLoginMarker(apiKey)) return;
 	const method = initialize.authMethods?.find((candidate) => {
 		const meta = candidate._meta as Record<string, unknown> | null | undefined;
 		return "api-key" in (meta ?? {}) || /api key/iu.test(candidate.name);
@@ -1343,21 +1328,6 @@ function adaptPromptToCapabilities(parts: PromptParts, initialize: InitializeRes
 		output.push(block);
 	}
 	return { ...parts, prompt: output };
-}
-
-function hasUsableLocalAuth(health: AntigravityAuthHealth): boolean {
-	return health.status === "api-key-env" || health.status === "oauth-refreshable";
-}
-
-/** Whether a runtime environment names a home of its own, which makes the
- * ambient isolation layer both unnecessary and unsafe to share. */
-function declaresHome(env: NodeJS.ProcessEnv | undefined): boolean {
-	if (!env) return false;
-	return Boolean(env.GEMINI_HOME?.trim() || env.HOME?.trim());
-}
-
-function supportsMode(session: SessionState, mode: PermissionMode): boolean {
-	return sessionModes(session)?.availableModes.some((candidate) => candidate.id === mode) === true;
 }
 
 function permissionView(permission: PendingPermission): PermissionView {
@@ -1443,18 +1413,6 @@ function messageFingerprint(message: Context["messages"][number]): string {
 		};
 	}
 	return createHash("sha256").update(canonicalJson(value)).digest("hex");
-}
-
-function canonicalJson(value: unknown): string {
-	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-	if (value && typeof value === "object") {
-		return `{${Object.entries(value as Record<string, unknown>)
-			.filter(([, child]) => child !== undefined)
-			.sort(([left], [right]) => left.localeCompare(right))
-			.map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
-			.join(",")}}`;
-	}
-	return JSON.stringify(value) ?? "null";
 }
 
 function findToolResult(

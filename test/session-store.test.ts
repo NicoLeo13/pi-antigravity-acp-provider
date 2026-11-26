@@ -27,6 +27,7 @@ describe("AcpSessionStore", () => {
 			piSessionId: "pi-1",
 			acpSessionId: "acp-1",
 			acpModelId: "gemini-low",
+			credentialId: "ambient",
 			cwd: "/tmp/project",
 			messageCount: 2,
 			historyFingerprint: "abc",
@@ -59,12 +60,12 @@ describe("AcpSessionStore", () => {
 		roots.push(root);
 		process.env.PI_CODING_AGENT_DIR = path.join(root, "one");
 		const first = new AcpSessionStore();
-		first.save({ piSessionId: "shared-id", acpSessionId: "profile-one", acpModelId: "auto", cwd: root,
+		first.save({ piSessionId: "shared-id", acpSessionId: "profile-one", acpModelId: "auto", credentialId: "ambient", cwd: root,
 			messageCount: 1, historyFingerprint: "one", lastActive: Date.now() });
 		process.env.PI_CODING_AGENT_DIR = path.join(root, "two");
 		const second = new AcpSessionStore();
 		expect(second.get("shared-id")).toBeUndefined();
-		second.save({ piSessionId: "shared-id", acpSessionId: "profile-two", acpModelId: "auto", cwd: root,
+		second.save({ piSessionId: "shared-id", acpSessionId: "profile-two", acpModelId: "auto", credentialId: "ambient", cwd: root,
 			messageCount: 1, historyFingerprint: "two", lastActive: Date.now() });
 		expect(first.get("shared-id")?.acpSessionId).toBe("profile-one");
 		expect(second.get("shared-id")?.acpSessionId).toBe("profile-two");
@@ -83,6 +84,7 @@ describe("AcpSessionStore", () => {
 			piSessionId: "pi-custom-1",
 			acpSessionId: "acp-custom-1",
 			acpModelId: "gemini-pro",
+			credentialId: "ambient",
 			cwd: "/tmp/custom",
 			messageCount: 1,
 			historyFingerprint: "custom-hash",

@@ -5,27 +5,12 @@ import path from "node:path";
 export type PermissionMode = "default" | "auto_edit" | "yolo";
 export type RuntimeUpdateMode = "automatic" | "notify" | "manual";
 export type ToolActivityMode = "off" | "compact" | "full";
-export type ToolBridgeMode = "all" | "ecosystem";
-
-/** A second Google account, isolated by its own Gemini home. The default
- * account is implicit and uses the ambient environment, so `id` may never be
- * `default`. */
-export interface AntigravityAccountConfig {
-	/** Slug used in the Pi provider id (`antigravity-acp-<id>`). */
-	id: string;
-	/** Picker label; the id is used when absent. */
-	label?: string;
-	/** Equivalent to `agy --gemini_dir`: tokens, settings and quota live here. */
-	geminiHome: string;
-}
 
 export interface AntigravityAcpConfig {
 	permissions: PermissionMode;
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
-	toolBridge: ToolBridgeMode;
-	isolatedGeminiHome: boolean;
-	accounts: AntigravityAccountConfig[];
+	nativeWorkflows: boolean;
 }
 
 export function resolvePiAgentDir(): string {
@@ -40,6 +25,14 @@ export function resolvePiAgentDir(): string {
 
 export function resolveConfigRoot(): string {
 	return path.join(resolvePiAgentDir(), "antigravity-acp-provider");
+}
+
+// agy writes files (skills/system/…) into the cwd of a session. Sessions that only read
+// models, quota or auth use this folder, so they do not write into the user's workspace.
+export function resolveUtilityCwd(): string {
+	const dir = path.join(resolveConfigRoot(), "utility-cwd");
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return dir;
 }
 
 export function resolveConfigPath(): string {
@@ -57,8 +50,6 @@ export function resolveLegacyGeminiConfigPath(): string {
 export const DEFAULT_CONFIG_PATH = resolveDefaultPiConfigPath();
 export const LEGACY_GEMINI_CONFIG_PATH = resolveLegacyGeminiConfigPath();
 
-export const CONFIG_PATH = resolveConfigPath();
-
 export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 	if (file === resolveConfigPath()) migrateConfig(file);
 	try {
@@ -66,49 +57,18 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			permissions?: unknown;
 			runtimeUpdates?: unknown;
 			toolActivity?: unknown;
-			toolBridge?: unknown;
-			isolatedGeminiHome?: unknown;
-			accounts?: unknown;
+			nativeWorkflows?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
-			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "ecosystem",
-			isolatedGeminiHome: typeof parsed.isolatedGeminiHome === "boolean" ? parsed.isolatedGeminiHome : true,
-			accounts: parseAccounts(parsed.accounts),
+			nativeWorkflows: parsed.nativeWorkflows === true,
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return {
-		permissions: "yolo",
-		runtimeUpdates: "automatic",
-		toolActivity: "compact",
-		toolBridge: "ecosystem",
-		isolatedGeminiHome: true,
-		accounts: [],
-	};
-}
-
-/** Keeps well-formed entries; whether an entry is usable (slug, reserved id,
- * duplicate, absolute path) is decided in `resolveAccounts`, which can report
- * a problem instead of silently dropping the account. */
-function parseAccounts(value: unknown): AntigravityAccountConfig[] {
-	if (!Array.isArray(value)) return [];
-	const accounts: AntigravityAccountConfig[] = [];
-	for (const entry of value) {
-		if (!entry || typeof entry !== "object") continue;
-		const { id, label, geminiHome } = entry as Record<string, unknown>;
-		if (typeof id !== "string") continue;
-		if (typeof geminiHome !== "string" || !geminiHome.trim()) continue;
-		accounts.push({
-			id: id.trim(),
-			geminiHome: geminiHome.trim(),
-			...(typeof label === "string" && label.trim() ? { label: label.trim() } : {}),
-		});
-	}
-	return accounts;
+	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", nativeWorkflows: false };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
@@ -121,18 +81,6 @@ export function saveRuntimeUpdateMode(mode: RuntimeUpdateMode, file = resolveCon
 
 export function saveToolActivityMode(mode: ToolActivityMode, file = resolveConfigPath()): void {
 	writeConfig({ ...loadConfig(file), toolActivity: mode }, file);
-}
-
-export function saveToolBridgeMode(mode: ToolBridgeMode, file = resolveConfigPath()): void {
-	writeConfig({ ...loadConfig(file), toolBridge: mode }, file);
-}
-
-export function saveIsolatedGeminiHome(enabled: boolean, file = resolveConfigPath()): void {
-	writeConfig({ ...loadConfig(file), isolatedGeminiHome: enabled }, file);
-}
-
-export function saveAccounts(accounts: AntigravityAccountConfig[], file = resolveConfigPath()): void {
-	writeConfig({ ...loadConfig(file), accounts }, file);
 }
 
 function writeConfig(config: AntigravityAcpConfig, file: string): void {
@@ -179,10 +127,6 @@ export function isRuntimeUpdateMode(value: unknown): value is RuntimeUpdateMode 
 
 export function isToolActivityMode(value: unknown): value is ToolActivityMode {
 	return value === "off" || value === "compact" || value === "full";
-}
-
-export function isToolBridgeMode(value: unknown): value is ToolBridgeMode {
-	return value === "all" || value === "ecosystem";
 }
 
 export function permissionModeLabel(mode: PermissionMode): string {

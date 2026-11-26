@@ -104,7 +104,7 @@ export function shouldUseHeadlessOAuth(
 ): boolean {
 	const override = environment.PI_ANTIGRAVITY_ACP_OAUTH_MODE?.trim().toLowerCase();
 	if (override === "manual") return true;
-	if (override === "browser") return false;
+	if (override === "browser" || platform === "win32") return false;
 	if (environment.SSH_CONNECTION || environment.SSH_CLIENT || environment.SSH_TTY) return true;
 	return platform === "linux" && !environment.DISPLAY && !environment.WAYLAND_DISPLAY;
 }
@@ -128,6 +128,10 @@ function parseAuthorization(text: string): CapturedOAuthAuthorization {
 	if (!redirect || !state) throw new Error("Antigravity OAuth URL is missing redirect or state data");
 	const redirectUrl = new URL(redirect);
 	validateLoopback(redirectUrl);
+	const prompts = new Set(url.searchParams.get("prompt")?.split(/\s+/u).filter(Boolean));
+	prompts.delete("none");
+	prompts.add("select_account");
+	url.searchParams.set("prompt", [...prompts].join(" "));
 	return { url: url.toString(), redirectUrl, state };
 }
 

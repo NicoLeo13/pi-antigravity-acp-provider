@@ -30,11 +30,14 @@ describe("Antigravity auth health", () => {
 
 	it("recognizes a structurally refreshable token and clears it", () => {
 		const directory = root();
-		fs.writeFileSync(path.join(directory, "settings.json"), '{"auth":{"type":"oauth-personal"}}');
+		const settings = '{"auth":{"type":"oauth-personal"},"other":true}';
+		fs.writeFileSync(path.join(directory, "settings.json"), settings);
 		fs.writeFileSync(path.join(directory, "acp_token.json"), '{"refresh_token":"secret"}');
 		expect(inspectAntigravityAuth(directory).status).toBe("oauth-refreshable");
 		clearAntigravityCredentials(directory);
-		expect(inspectAntigravityAuth(directory).status).toBe("missing");
+		clearAntigravityCredentials(directory);
+		expect(inspectAntigravityAuth(directory).status).toBe("configured-not-authenticated");
+		expect(fs.readFileSync(path.join(directory, "settings.json"), "utf8")).toBe(settings);
 	});
 
 	it("reports corrupt token files", () => {

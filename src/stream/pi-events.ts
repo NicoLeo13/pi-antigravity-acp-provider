@@ -60,7 +60,7 @@ export class PiEventWriter {
 		if (!isJsonObject(args)) {
 			throw new AntigravityAcpError("invalid_input", "Pi tool arguments must be a valid JSON object");
 		}
-		this.ensureStarted();
+		this.start();
 		this.closeOpen();
 		const toolCall: ToolCall = { type: "toolCall", id, name, arguments: args };
 		this.message.content.push(toolCall);
@@ -77,7 +77,7 @@ export class PiEventWriter {
 
 	done(reason: Extract<StopReason, "stop" | "length" | "toolUse">): void {
 		if (this.terminal) return;
-		this.ensureStarted();
+		this.start();
 		if (this.message.content.length === 0) this.ensureOpen("text");
 		this.closeOpen();
 		this.terminal = true;
@@ -100,8 +100,8 @@ export class PiEventWriter {
 		this.stream.end();
 	}
 
-	private ensureStarted(): void {
-		if (this.started) return;
+	start(): void {
+		if (this.started || this.terminal) return;
 		this.started = true;
 		this.stream.push({ type: "start", partial: this.message });
 	}
@@ -109,7 +109,7 @@ export class PiEventWriter {
 	private ensureOpen(kind: "text" | "thinking"): number {
 		if (this.open?.kind === kind) return this.open.index;
 		this.closeOpen();
-		this.ensureStarted();
+		this.start();
 		const index = this.message.content.length;
 		if (kind === "text") {
 			this.message.content.push({ type: "text", text: "" });

@@ -20,6 +20,12 @@ export class AntigravityAcpError extends Error {
 	}
 }
 
+export class AcpOperationTimeoutError extends AntigravityAcpError {
+	constructor(readonly operation: string, timeoutMs: number, detail = "") {
+		super("timeout", `Antigravity ACP ${operation} timed out after ${timeoutMs}ms${detail.trim() ? `: ${redact(detail.trim())}` : ""}`);
+	}
+}
+
 export function abortError(message = "Antigravity ACP request aborted"): AntigravityAcpError {
 	return new AntigravityAcpError("aborted", message);
 }

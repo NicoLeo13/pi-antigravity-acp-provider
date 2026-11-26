@@ -22,8 +22,12 @@ let permissionPromptId;
 let hangingPromptId;
 let bridgePromptId;
 let mcpServer;
+const tracksAuth = scenario === "headless-auth" || scenario === "browser-auth";
+let authMode = process.env.GEMINI_API_KEY ? "environment key" : "Google account";
 // Set while the resource-exhausted scenario waits for the client to answer its permission request.
 let resumeAfterPermission;
+// Set while a bridge call and a permission request from the same inference are both outstanding.
+let resolveMixedPermission;
 
 for await (const line of rl) {
 	if (!line.trim()) continue;
@@ -45,8 +49,11 @@ for await (const line of rl) {
 	}
 	const { id, method, params } = message;
 	if (process.env.FAKE_AGENT_LOG_FILE && method) fs.appendFileSync(process.env.FAKE_AGENT_LOG_FILE,
-		JSON.stringify({ method, ...(method === "initialize" ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
-	if (id === "exhausted-permission" && method === undefined) {
+		JSON.stringify({ method, ...(["initialize", "session/new", "session/load", "session/resume"].includes(method) ? { params } : {}), ...(method === "session/prompt" ? { prompt: params.prompt, mode } : {}), ...(method === "session/set_mode" ? { modeId: params.modeId } : {}) }) + "\n");
+	if (id === "mixed-permission" && method === undefined) {
+		resolveMixedPermission?.(message.result?.outcome?.optionId ?? message.result?.outcome?.outcome ?? "cancelled");
+		resolveMixedPermission = undefined;
+	} else if (id === "exhausted-permission" && method === undefined) {
 		resumeAfterPermission?.();
 		resumeAfterPermission = undefined;
 	} else if (id === "permission-1" && method === undefined) {
@@ -63,6 +70,9 @@ for await (const line of rl) {
 		send({ jsonrpc: "2.0", id: permissionPromptId, result: { stopReason: "end_turn" } });
 		permissionPromptId = undefined;
 	} else if (method === "initialize") {
+		if (scenario === "diagnostic-signals") {
+			process.stderr.write("HTTP 429 RESOURCE_EXHAUSTED retrying in 2s authorization: Bearer TEST_SECRET prompt=PRIVATE_PROMPT\nSyntaxWarning: PRIVATE_FILE_CONTENT\n");
+		}
 		if (scenario === "initialize-timeout") continue;
 		if (scenario === "malformed-output") {
 			process.stdout.write("not-json\n");
@@ -93,7 +103,19 @@ for await (const line of rl) {
 			setTimeout(() => process.exit(0), 10);
 		}
 	} else if (method === "authenticate") {
-		if (scenario === "headless-auth") {
+		if (tracksAuth && params.methodId === "api") authMode = "API key";
+		if (tracksAuth && params.methodId === "oauth-personal") {
+			const tokenFile = path.join(process.env.GEMINI_HOME, "antigravity-acp", "acp_token.json");
+			if (scenario === "browser-auth") {
+				fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+				fs.writeFileSync(tokenFile, '{"refresh_token":"browser-fixture"}');
+				send({ jsonrpc: "2.0", id, result: {} });
+				continue;
+			}
+			if (fs.existsSync(tokenFile)) {
+				send({ jsonrpc: "2.0", id, result: {} });
+				continue;
+			}
 			const state = "fake-oauth-state";
 			const server = http.createServer((request, response) => {
 				const callback = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -101,6 +123,8 @@ for await (const line of rl) {
 					response.writeHead(400).end("Invalid callback");
 					return;
 				}
+				fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+				fs.writeFileSync(tokenFile, JSON.stringify({ refresh_token: callback.searchParams.get("code") }));
 				response.writeHead(200).end("Authenticated");
 				server.close();
 				send({ jsonrpc: "2.0", id, result: {} });
@@ -146,7 +170,8 @@ for await (const line of rl) {
 			for (const suffix of [".db", ".db-shm", ".db-wal"]) fs.writeFileSync(path.join(conversations, sessionId + suffix), "");
 			fs.writeFileSync(path.join(conversations, `${sessionId}.meta`), JSON.stringify({ cwd: params.cwd }));
 		}
-		if (process.env.FAKE_AGENT_WRITE_RUN_WORKFLOW === "1" && params.cwd) {
+		if (process.env.FAKE_AGENT_WRITE_RUN_WORKFLOW === "1" && params.cwd &&
+			!params._meta?.antigravity?.disabledTools?.includes("run_workflow")) {
 			const skillDir = path.join(params.cwd, "skills", "system", "run-workflow");
 			const skillFile = path.join(skillDir, "SKILL.md");
 			if (!fs.existsSync(skillFile)) {
@@ -174,7 +199,7 @@ for await (const line of rl) {
 		send({
 			jsonrpc: "2.0",
 			id,
-			result: modern ? { configOptions: sessionConfigOptions() } : {
+			result: modern ? { configOptions: sessionConfigOptions(true) } : {
 				modes: sessionModes(true),
 				models: { currentModelId: model, availableModels: [] },
 			},
@@ -184,7 +209,13 @@ for await (const line of rl) {
 			if (!qualifiedModelRejected || ["auto", "gemini-test"].includes(params.value)) model = params.value;
 		} else if (params.configId === "thinking-level-selector") effort = params.value;
 		else if (params.configId === "permission-selector") {
-			if (scenario !== "config-options-ignored-mode") mode = params.value;
+			if (scenario !== "config-options-ignored-mode") {
+				mode = params.value;
+				if (process.env.FAKE_AGENT_EMIT_MODE_UPDATES === "1") {
+					send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId,
+						update: { sessionUpdate: "config_option_update", configOptions: sessionConfigOptions() } } });
+				}
+			}
 		}
 		else {
 			send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown selector" } });
@@ -207,6 +238,10 @@ for await (const line of rl) {
 			continue;
 		}
 		mode = params.modeId;
+		if (process.env.FAKE_AGENT_EMIT_MODE_UPDATES === "1") {
+			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId,
+				update: { sessionUpdate: "current_mode_update", currentModeId: mode } } });
+		}
 		send({ jsonrpc: "2.0", id, result: {} });
 	} else if (method === "session/prompt") {
 		const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
@@ -219,8 +254,14 @@ for await (const line of rl) {
 				? `Intercepted /${slash}`
 				: scenario === "usage-unavailable"
 					? "### Session Usage\n- **Session total:** data not available yet\n\n### Quota Limits\n- Unable to retrieve quota status (backend unavailable)"
-					: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8");
+					: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8").replace("Gemini Models", tracksAuth ? authMode : "Gemini Models");
 			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: reply } } } });
+			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
+		if (tracksAuth) {
+			send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId,
+				update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: authMode } } } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
 			continue;
 		}
@@ -283,6 +324,26 @@ for await (const line of rl) {
 			});
 			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } });
 			send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			continue;
+		}
+		if (!continuing && text.includes("bridge and permission") && mcpServer) {
+			// Like agy in default mode: one inference starts a pi-bridge call, then asks to run a
+			// native action before that call returns. Both answers are needed to finish the prompt.
+			const decision = new Promise((resolve) => { resolveMixedPermission = resolve; });
+			const bridge = invokeMcpTool(mcpServer, "from gemini", () => {
+				setTimeout(() => send({ jsonrpc: "2.0", id: "mixed-permission", method: "session/request_permission", params: {
+					sessionId: params.sessionId,
+					toolCall: { toolCallId: "native-tool-2", title: "Run native command", kind: "execute" },
+					options: [
+						{ optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+						{ optionId: "reject-once", name: "Reject", kind: "reject_once" },
+					],
+				} }), 20);
+			});
+			void Promise.all([bridge, decision]).then(([result, choice]) => {
+				notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: `${result}|${choice}` } });
+				send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+			}).catch(() => undefined);
 			continue;
 		}
 		if (!continuing && text.includes("bridge") && mcpServer) {
@@ -506,10 +567,15 @@ function sessionModes(restored = false) {
 	if (scenario === "no-mode-metadata") return undefined;
 	const unavailable = scenario === "no-auto-edit-mode" ? "auto_edit"
 		: scenario === "no-default-mode" || (restored && scenario === "no-default-on-restore") ? "default" : undefined;
-	return { currentModeId: mode, availableModes: ["default", "auto_edit", "yolo"].filter((id) => id !== unavailable).map((id) => ({ id, name: id })) };
+	return { currentModeId: mode, availableModes: permissionIds(restored).filter((id) => id !== unavailable).map((id) => ({ id, name: id })) };
 }
 
-function sessionConfigOptions() {
+function permissionIds(restored = false) {
+	const configured = (restored ? process.env.FAKE_AGENT_RESTORED_MODE_IDS : undefined) ?? process.env.FAKE_AGENT_MODE_IDS;
+	return configured ? configured.split(",") : ["default", "auto_edit", "yolo"];
+}
+
+function sessionConfigOptions(restored = false) {
 	return [
 		{ id: "model-selector", name: "Model", category: "model", type: "select", currentValue: model,
 			options: [{ group: "google", name: "Google", options: [
@@ -520,7 +586,7 @@ function sessionConfigOptions() {
 				currentValue: effort, options: ["low", "medium", "high"].map((value) => ({ value, name: value })) }]
 			: []),
 		{ id: "permission-selector", name: "Permissions", category: "mode", type: "select", currentValue: mode,
-			options: ["default", "auto_edit", "yolo"].map((value) => ({ value, name: value })) },
+			options: permissionIds(restored).map((value) => ({ value, name: value })) },
 	];
 }
 

@@ -17,6 +17,17 @@ const model: Model<Api> = {
 };
 
 describe("PiEventWriter", () => {
+	it("emits an idempotent early start without fabricated content", async () => {
+		const writer = new PiEventWriter(model);
+		writer.start(); writer.start();
+		const iterator = writer.stream[Symbol.asyncIterator]();
+		expect((await iterator.next()).value).toMatchObject({ type: "start", partial: { content: [], stopReason: "pending" } });
+		expect(writer.message.content).toEqual([]);
+		writer.fail(new Error("setup failed")); writer.start();
+		expect((await iterator.next()).value).toMatchObject({ type: "error" });
+		expect((await iterator.next()).done).toBe(true);
+	});
+
 	it("balances blocks when switching thought and text", async () => {
 		const writer = new PiEventWriter(model);
 		writer.thinking("think");

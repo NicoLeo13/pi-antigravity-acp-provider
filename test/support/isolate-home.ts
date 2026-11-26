@@ -10,6 +10,8 @@ export default function isolateHome(): (() => void) | undefined {
 	if (LIVE_FLAGS.some((name) => process.env[name] === "1")) return undefined;
 	const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-agy-test-home-")));
 	process.env.HOME = home;
+	process.env.USERPROFILE = home;
+	process.env.PI_CODING_AGENT_DIR = path.join(home, ".pi", "agent");
 	delete process.env.GEMINI_HOME;
 	return () => fs.rmSync(home, { recursive: true, force: true });
 }

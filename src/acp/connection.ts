@@ -15,10 +15,12 @@ import {
 } from "@agentclientprotocol/sdk/unstable";
 
 import { PACKAGE_VERSION } from "../constants.js";
+import { loadConfig } from "../config.js";
 import { boundedNdjsonStream } from "./bounded-stream.js";
-import { abortError, AntigravityAcpError, redact } from "./errors.js";
+import { abortError, AntigravityAcpError, AcpOperationTimeoutError, redact } from "./errors.js";
 import { AntigravityProcess, type AntigravityProcessOptions } from "./process.js";
 import { PromptWatchdog } from "./prompt-watchdog.js";
+import { AcpDiagnostics, type AcpOperation } from "./diagnostics.js";
 import { ResourceExhaustionTracker } from "./quota.js";
 import {
 	decodeSessionState,
@@ -38,6 +40,7 @@ export interface AntigravityConnectionHandlers {
 
 export interface AntigravityConnectionOptions extends AntigravityProcessOptions {
 	handlers?: AntigravityConnectionHandlers;
+	nativeWorkflows?: boolean;
 	initializeTimeoutMs?: number;
 	operationTimeoutMs?: number;
 	/** No inbound progress while the model is idle (default 10 minutes). */
@@ -51,6 +54,8 @@ export class AntigravityAcpConnection {
 	readonly process: AntigravityProcess;
 	readonly initialized: Promise<InitializeResponse>;
 	private readonly connection: ClientConnection;
+	private readonly nativeWorkflows: boolean;
+	private readonly diagnostics: AcpDiagnostics;
 	private readonly operationTimeoutMs: number;
 	private readonly promptIdleTimeoutMs: number;
 	private readonly promptWorkIdleTimeoutMs: number;
@@ -64,13 +69,22 @@ export class AntigravityAcpConnection {
 
 	constructor(options: AntigravityConnectionOptions) {
 		this.handlers = options.handlers ?? {};
+		this.nativeWorkflows = options.nativeWorkflows ?? loadConfig().nativeWorkflows;
 		this.operationTimeoutMs = options.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
 		this.promptIdleTimeoutMs = options.promptIdleTimeoutMs ?? 10 * 60_000;
 		this.promptWorkIdleTimeoutMs = options.promptWorkIdleTimeoutMs ?? 60 * 60_000;
 		// Validate before spawning a process, including programmatic timeout overrides.
 		new PromptWatchdog(this.promptIdleTimeoutMs, this.promptWorkIdleTimeoutMs, () => undefined).dispose();
-		this.process = new AntigravityProcess(options);
+		this.diagnostics = new AcpDiagnostics();
+		try {
+			this.process = new AntigravityProcess(options);
+		} catch (error) {
+			this.diagnostics.close();
+			throw error;
+		}
+		this.diagnostics.spawn();
 		this.process.onStderrLine((line) => {
+			this.diagnostics.stderr(line);
 			for (const tracker of this.exhaustion.values()) tracker.noteStderrLine(line);
 		});
 		let rejectProtocolFailure!: (error: Error) => void;
@@ -81,6 +95,7 @@ export class AntigravityAcpConnection {
 		// active. Individual operations still race against the original promise.
 		void this.protocolFailure.catch(() => undefined);
 		this.processFailure = this.process.exited.then(({ code, signal, stderrTail }) => {
+			this.diagnostics.exit(code, signal);
 			const status = signal ? `signal ${signal}` : `code ${String(code)}`;
 			const detail = stderrTail.trim() ? `: ${stderrTail.trim()}` : "";
 			throw new AntigravityAcpError(
@@ -141,7 +156,10 @@ export class AntigravityAcpConnection {
 			}),
 			options.initializeTimeoutMs ?? 30_000,
 			"initialize",
-		);
+		).then((response) => {
+			this.diagnostics.identity(response.agentInfo);
+			return response;
+		});
 		// Initialization can outlive a cancelled catalog refresh.
 		void this.initialized.catch(() => undefined);
 	}
@@ -174,6 +192,13 @@ export class AntigravityAcpConnection {
 		);
 	}
 
+	private sessionToolMetadata() {
+		// run_workflow materializes its built-in skill into the workspace. Use the
+		// server's tool filter rather than deleting files or changing the session cwd.
+		// An explicit empty filter also clears a filter persisted by an older session.
+		return { antigravity: { disabledTools: this.nativeWorkflows ? [] : ["run_workflow"] } };
+	}
+
 	async newSession(
 		cwd: string,
 		signal?: AbortSignal,
@@ -182,7 +207,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.new, { cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.new, { cwd, mcpServers, _meta: this.sessionToolMetadata() }),
 				this.operationTimeoutMs,
 				"session/new",
 			),
@@ -205,7 +230,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.load, { sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.load, { sessionId, cwd, mcpServers, _meta: this.sessionToolMetadata() }),
 				this.operationTimeoutMs,
 				"session/load",
 			),
@@ -223,7 +248,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		const response = await this.withAbort(
 			this.withDeadline(
-				this.connection.agent.request(methods.agent.session.resume, { sessionId, cwd, mcpServers }),
+				this.connection.agent.request(methods.agent.session.resume, { sessionId, cwd, mcpServers, _meta: this.sessionToolMetadata() }),
 				this.operationTimeoutMs,
 				"session/resume",
 			),
@@ -328,6 +353,7 @@ export class AntigravityAcpConnection {
 	}
 
 	async cancel(sessionId: string): Promise<void> {
+		this.diagnostics.cancel();
 		await this.connection.agent.notify(methods.agent.session.cancel, { sessionId });
 	}
 
@@ -335,9 +361,13 @@ export class AntigravityAcpConnection {
 		return this.closePromise !== undefined || this.connection.signal.aborted || !this.process.alive;
 	}
 
+	get diagnosticsPath(): string | undefined {
+		return this.diagnostics.filePath;
+	}
+
 	async close(): Promise<void> {
 		(this.connection as ClientConnection | undefined)?.close();
-		this.closePromise ??= this.process.close();
+		this.closePromise ??= this.process.close().finally(() => this.diagnostics.close());
 		await this.closePromise;
 	}
 
@@ -429,10 +459,10 @@ export class AntigravityAcpConnection {
 		this.exhaustion.set(request.sessionId, exhaustion);
 		watchdog.arm();
 		try {
-			return await Promise.race([
+			return await this.diagnostics.operation("session/prompt", () => Promise.race([
 				this.connection.agent.request(methods.agent.session.prompt, request).catch((error: unknown) => { throw classifyError(error); }),
 				this.protocolFailure, this.processFailure, stalled,
-			]);
+			]));
 		} finally {
 			watchdog.dispose();
 			exhaustion.dispose();
@@ -441,10 +471,10 @@ export class AntigravityAcpConnection {
 		}
 	}
 
-	private async withDeadline<T>(promise: Promise<T>, timeoutMs: number, phase: string): Promise<T> {
+	private async withDeadline<T>(promise: Promise<T>, timeoutMs: number, phase: AcpOperation): Promise<T> {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			return await Promise.race([
+			return await this.diagnostics.operation(phase, () => Promise.race([
 				promise.catch((error: unknown) => {
 					throw classifyError(error);
 				}),
@@ -452,13 +482,12 @@ export class AntigravityAcpConnection {
 				this.processFailure,
 				new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
-						const detail = this.process.stderrTail.trim() ? `: ${this.process.stderrTail.trim()}` : "";
 						void this.close();
-						reject(new AntigravityAcpError("timeout", `Antigravity ACP ${phase} timed out after ${timeoutMs}ms${detail}`));
+						reject(new AcpOperationTimeoutError(phase, timeoutMs, this.process.stderrTail));
 					}, timeoutMs);
 					timer.unref?.();
 				}),
-			]);
+			]));
 		} finally {
 			if (timer) clearTimeout(timer);
 		}
