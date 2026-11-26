@@ -84,46 +84,7 @@ describe("extension entry point", () => {
 		const { pi } = await load("parent");
 		expect(registry.get("antigravity-acp")).toBe(pi.providers[0]);
 		expect(pi.tools.has(PERMISSION_TOOL_NAME)).toBe(true);
-		expect([...pi.commands.keys()]).toEqual([
-			"antigravity-acp",
-			"antigravity-acp:setup",
-			"antigravity-acp:accounts",
-			"antigravity-acp:update",
-			"antigravity-acp:update-runtime",
-			"antigravity-acp:updates",
-			"antigravity-acp:logout",
-			"antigravity-acp:account",
-			"antigravity-acp:switch-account",
-			"antigravity-acp:quota",
-			"antigravity-acp:qualify",
-			"antigravity-acp:permissions",
-			"antigravity-acp:tool-activity",
-			"antigravity-acp:tool-bridge",
-			"antigravity-acp:isolated-home",
-			"antigravity-acp:doctor",
-			"antigravity-acp:status",
-			"gemini-acp",
-		]);
-	});
-
-	it("forwards arguments from a direct colon command to the subcommand", async () => {
-		const { pi, ctx } = await load("parent");
-		const { loadConfig } = await import("../src/config.js");
-		const command = pi.commands.get("antigravity-acp:tool-activity");
-		expect(command).toBeDefined();
-		expect(loadConfig().toolActivity).toBe("compact");
-		await command!.handler("off", ctx as never);
-		expect(loadConfig().toolActivity).toBe("off");
-		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity tool activity: off", "info"]);
-	});
-
-	it("gives each colon command its own description", async () => {
-		const { pi } = await load("parent");
-		const aliases = [...pi.commands.entries()].filter(([name]) => name.startsWith("antigravity-acp:"));
-		expect(aliases.length).toBeGreaterThan(1);
-		expect(new Set(aliases.map(([, command]) => command.description)).size).toBe(aliases.length);
-		expect(pi.commands.get("antigravity-acp:quota")!.description).toContain("per-account quota");
-		expect(pi.commands.get("antigravity-acp:setup")!.description).toContain("sign-in wizard");
+		expect([...pi.commands.keys()]).toEqual(["antigravity-acp", "gemini-acp"]);
 	});
 
 	it("keeps the parent session usable after a child instance shuts down", async () => {

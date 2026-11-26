@@ -175,15 +175,6 @@ describe("multi-account extension", () => {
 		expect(thinking).not.toContain("[Antigravity tool:");
 	});
 
-	it("exposes account management as a direct colon command", async () => {
-		const { pi } = await load();
-		const ctx = createFakeContext({ sessionId: "colon-accounts" });
-		await pi.commands.get("antigravity-acp:accounts")!.handler("list", ctx as never);
-		const text = ctx.ui.notify.mock.calls.at(-1)![0] as string;
-		expect(text).toContain("antigravity-acp-work");
-		expect(ctx.ui.select).not.toHaveBeenCalled();
-	});
-
 	it("lists accounts from the menu without reading the JSON by hand", async () => {
 		const { pi } = await load();
 		const ctx = createFakeContext({
