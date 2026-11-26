@@ -17,7 +17,7 @@ import {
 import { PACKAGE_VERSION } from "../constants.js";
 import { loadConfig } from "../config.js";
 import { boundedNdjsonStream } from "./bounded-stream.js";
-import { abortError, AntigravityAcpError, redact } from "./errors.js";
+import { abortError, AntigravityAcpError, AcpOperationTimeoutError, redact } from "./errors.js";
 import { AntigravityProcess, type AntigravityProcessOptions } from "./process.js";
 import { PromptWatchdog } from "./prompt-watchdog.js";
 import { ResourceExhaustionTracker } from "./quota.js";
@@ -463,9 +463,8 @@ export class AntigravityAcpConnection {
 				this.processFailure,
 				new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
-						const detail = this.process.stderrTail.trim() ? `: ${this.process.stderrTail.trim()}` : "";
 						void this.close();
-						reject(new AntigravityAcpError("timeout", `Antigravity ACP ${phase} timed out after ${timeoutMs}ms${detail}`));
+						reject(new AcpOperationTimeoutError(phase, timeoutMs, this.process.stderrTail));
 					}, timeoutMs);
 					timer.unref?.();
 				}),

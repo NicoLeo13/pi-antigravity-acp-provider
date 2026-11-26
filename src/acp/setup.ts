@@ -12,6 +12,7 @@ import { resolveAntigravityAcpLaunch, type AntigravityLaunch } from "./antigravi
 import { fileBackedAcpEnvironment, providerAcpDirectory } from "./credential-storage.js";
 import { AntigravityAcpConnection } from "./connection.js";
 import { AntigravityAcpError } from "./errors.js";
+import { runtimeSetupError } from "./setup-errors.js";
 import {
 	compareRuntimeVersions,
 	latestManifestRelease,
@@ -302,11 +303,7 @@ async function installRuntime(
 			return { version: release.version, changed, binary };
 		});
 	} catch (cause) {
-		throw new AntigravityAcpError(
-			"spawn",
-			`Google Antigravity ACP setup failed: ${cause instanceof Error ? cause.message : String(cause)}. Set AGY_ACP_BIN to a trusted manual installation if needed.`,
-			{ cause },
-		);
+		throw runtimeSetupError(cause, release);
 	}
 }
 
