@@ -205,6 +205,7 @@ describe("extension entry point", () => {
 			runtimeUpdates: "notify",
 			toolActivity: "off",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 	});
 

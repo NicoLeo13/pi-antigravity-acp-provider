@@ -12,6 +12,7 @@ export interface AntigravityAcpConfig {
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
 	toolBridge: ToolBridgeMode;
+	nativeWorkflows: boolean;
 }
 
 export function resolvePiAgentDir(): string {
@@ -26,6 +27,14 @@ export function resolvePiAgentDir(): string {
 
 export function resolveConfigRoot(): string {
 	return path.join(resolvePiAgentDir(), "antigravity-acp-provider");
+}
+
+// agy writes files (skills/system/…) into the cwd of a session. Sessions that only read
+// models, quota or auth use this folder, so they do not write into the user's workspace.
+export function resolveUtilityCwd(): string {
+	const dir = path.join(resolveConfigRoot(), "utility-cwd");
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return dir;
 }
 
 export function resolveConfigPath(): string {
@@ -43,8 +52,6 @@ export function resolveLegacyGeminiConfigPath(): string {
 export const DEFAULT_CONFIG_PATH = resolveDefaultPiConfigPath();
 export const LEGACY_GEMINI_CONFIG_PATH = resolveLegacyGeminiConfigPath();
 
-export const CONFIG_PATH = resolveConfigPath();
-
 export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 	if (file === resolveConfigPath()) migrateConfig(file);
 	try {
@@ -53,17 +60,19 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			runtimeUpdates?: unknown;
 			toolActivity?: unknown;
 			toolBridge?: unknown;
+			nativeWorkflows?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
 			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "all",
+			nativeWorkflows: parsed.nativeWorkflows === true,
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "all" };
+	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "all", nativeWorkflows: false };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {

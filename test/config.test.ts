@@ -29,6 +29,21 @@ afterEach(() => {
 		process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
 	}
 	for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
+
+	it("requires an explicit native workflow opt-in and preserves it when saving other settings", () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-workflows-"));
+		directories.push(directory);
+		const file = path.join(directory, "config.json");
+		for (const value of [undefined, false, "true", 1, null]) {
+			fs.writeFileSync(file, JSON.stringify({ nativeWorkflows: value }));
+			expect(loadConfig(file).nativeWorkflows).toBe(false);
+		}
+		fs.writeFileSync(file, JSON.stringify({ nativeWorkflows: true }));
+		savePermissionMode("default", file);
+		saveRuntimeUpdateMode("manual", file);
+		saveToolActivityMode("off", file);
+		expect(loadConfig(file).nativeWorkflows).toBe(true);
+	});
 });
 
 describe("permission configuration", () => {
@@ -41,6 +56,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 		saveRuntimeUpdateMode("notify", file);
 		savePermissionMode("auto_edit", file);
@@ -50,6 +66,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "notify",
 			toolActivity: "off",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 	});
 
@@ -126,6 +143,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 		savePermissionMode("default");
 		expect(loadConfig()).toEqual({
@@ -133,6 +151,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 
 		const configFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
@@ -175,6 +194,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "manual",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 		const targetFile = path.join(fakeHome, ".pi", "agent", "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -201,6 +221,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "notify",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 		const targetFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -228,6 +249,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "manual",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 		expect(fs.readFileSync(target, "utf8")).toBe(existing);
 		fs.unlinkSync(target);
@@ -236,6 +258,7 @@ describe("permission configuration", () => {
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
 			toolBridge: "all",
+			nativeWorkflows: false,
 		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);

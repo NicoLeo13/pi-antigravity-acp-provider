@@ -8,9 +8,11 @@ import { promisify } from "node:util";
 import { Open, type File as ZipFile } from "unzipper";
 
 import { loadConfig, type RuntimeUpdateMode } from "../config.js";
-import { resolveAntigravityAcpDirectory, resolveAntigravityAcpLaunch, type AntigravityLaunch } from "./antigravity.js";
+import { resolveAntigravityAcpLaunch, type AntigravityLaunch } from "./antigravity.js";
+import { fileBackedAcpEnvironment, providerAcpDirectory } from "./credential-storage.js";
 import { AntigravityAcpConnection } from "./connection.js";
 import { AntigravityAcpError } from "./errors.js";
+import { runtimeSetupError } from "./setup-errors.js";
 import {
 	compareRuntimeVersions,
 	latestManifestRelease,
@@ -301,11 +303,7 @@ async function installRuntime(
 			return { version: release.version, changed, binary };
 		});
 	} catch (cause) {
-		throw new AntigravityAcpError(
-			"spawn",
-			`Google Antigravity ACP setup failed: ${cause instanceof Error ? cause.message : String(cause)}. Set AGY_ACP_BIN to a trusted manual installation if needed.`,
-			{ cause },
-		);
+		throw runtimeSetupError(cause, release);
 	}
 }
 
@@ -430,20 +428,29 @@ export function isExpectedRuntimeIdentity(
 }
 
 async function validateRuntime(directory: string, release: ResolvedRuntimeRelease): Promise<void> {
-	const connection = new AntigravityAcpConnection({
-		cwd: directory,
-		command: path.join(directory, release.binaryName),
-		args: release.args,
-		initializeTimeoutMs: VALIDATION_TIMEOUT_MS,
-		operationTimeoutMs: VALIDATION_TIMEOUT_MS,
-	});
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-validation-"));
+	const env = fileBackedAcpEnvironment(home);
+	delete env.GEMINI_API_KEY;
+	let connection: AntigravityAcpConnection | undefined;
 	try {
+		connection = new AntigravityAcpConnection({
+			cwd: directory,
+			command: path.join(directory, release.binaryName),
+			args: release.args,
+			env,
+			initializeTimeoutMs: VALIDATION_TIMEOUT_MS,
+			operationTimeoutMs: VALIDATION_TIMEOUT_MS,
+		});
 		const initialized = await connection.initialize();
 		if (!isExpectedRuntimeIdentity(initialized, release.version)) {
 			throw new Error("Downloaded runtime did not identify as the expected Antigravity ACP release");
 		}
 	} finally {
-		await connection.close();
+		try {
+			await connection?.close();
+		} finally {
+			fs.rmSync(home, { recursive: true, force: true });
+		}
 	}
 }
 
@@ -719,7 +726,7 @@ function pointCurrentAt(root: string, destination: string): void {
 }
 
 function configureDefaultAuth(): void {
-	const directory = resolveAntigravityAcpDirectory();
+	const directory = providerAcpDirectory();
 	const settingsFile = path.join(directory, "settings.json");
 	const tokenFile = path.join(directory, "acp_token.json");
 	if (fs.existsSync(tokenFile)) return;

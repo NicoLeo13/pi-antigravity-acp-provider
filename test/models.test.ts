@@ -1,12 +1,27 @@
 import { describe, expect, it } from "vitest";
 
-import { FALLBACK_MODELS, projectModels, resolveAcpModelId, splitEffortSuffix } from "../src/models.js";
+import { FALLBACK_MODELS, projectModels, resolveAcpModelId, restoreModels, splitEffortSuffix } from "../src/models.js";
 import { createAntigravityProvider } from "../src/provider.js";
 
 describe("projectModels", () => {
 	it("keeps Flash as the conservative offline default while allowing explicit Argon selection", () => {
 		expect(FALLBACK_MODELS[0]?.id).toBe("gemini-3.8-flash");
 		expect(FALLBACK_MODELS.some((model) => model.id === "gemini-4-argon")).toBe(true);
+	});
+
+	it("lists Carbon offline with the tiers the official ACP server advertises", () => {
+		const carbon = FALLBACK_MODELS.find((model) => model.id === "gemini-4-carbon");
+		expect(carbon).toMatchObject({
+			name: "Gemini 4 Carbon",
+			reasoning: true,
+			thinkingLevelMap: {
+				low: "gemini-4-carbon-low",
+				medium: "gemini-4-carbon-medium",
+				high: "gemini-4-carbon-high",
+				xhigh: null,
+			},
+		});
+		expect(carbon?.cost.input).toBe(2);
 	});
 
 	it.each(["low", "medium", "high"])("splits a known %s suffix without truncating the base", (effort) => {
@@ -84,5 +99,46 @@ describe("projectModels", () => {
 		} finally {
 			await runtime.close();
 		}
+	});
+});
+
+describe("restoreModels", () => {
+	const discovered = projectModels([
+		{ modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
+		{ modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
+		{ modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
+		{ modelId: "gemini-next-preview", name: "Gemini Next Preview" },
+	]);
+
+	it("round-trips a discovered catalog through JSON persistence", () => {
+		const restored = restoreModels(JSON.parse(JSON.stringify(discovered)) as unknown[]);
+		expect(restored).toEqual(discovered);
+		expect(resolveAcpModelId(restored[0]!, "high")).toBe("gemini-4-carbon-high");
+		expect(restored[1]).toMatchObject({ id: "gemini-next-preview", reasoning: false });
+	});
+
+	it("rebuilds entries with current rates and limits instead of trusting stored values", () => {
+		const stale = { ...discovered[0]!, cost: { input: 99, output: 99, cacheRead: 99, cacheWrite: 99 }, contextWindow: 1 };
+		const [restored] = restoreModels([stale]);
+		expect(restored?.cost).toEqual(discovered[0]!.cost);
+		expect(restored?.contextWindow).toBe(discovered[0]!.contextWindow);
+	});
+
+	it("skips foreign, malformed, duplicate and tierless entries", () => {
+		const carbon = discovered[0]!;
+		const restored = restoreModels([
+			null,
+			"gemini-4-carbon",
+			{ ...carbon, provider: "google" },
+			{ ...carbon, api: "openai-completions" },
+			{ ...carbon, id: "bad\nmodel" },
+			{ ...carbon, id: 42 },
+			{ ...carbon, reasoning: undefined },
+			{ ...carbon, id: "gemini-tierless", thinkingLevelMap: { low: null, medium: null, high: null } },
+			{ ...carbon, id: "gemini-unsafe-tier", thinkingLevelMap: { low: "bad\ntier" } },
+			carbon,
+			{ ...carbon, name: "duplicate" },
+		]);
+		expect(restored).toEqual([carbon]);
 	});
 });

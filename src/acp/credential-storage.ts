@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 
+import { resolveConfigRoot } from "../config.js";
 import { inspectAntigravityAuth, resolveAntigravityAcpDirectory } from "./antigravity.js";
 
 /** Selects the Antigravity ACP server's secure-file credential backend
@@ -11,6 +12,23 @@ export const FORCE_FILE_STORAGE_ENV = "AGY_ACP_FORCE_FILE_STORAGE";
  * `credential_store.KEYCHAIN_SERVICE` and the consumer `_KEYCHAIN_ACCOUNT`. */
 export const KEYCHAIN_SERVICE = "gemini";
 export const KEYCHAIN_ACCOUNT = "antigravity-acp";
+
+export function fileBackedAcpEnvironment(home: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	return {
+		...env,
+		GEMINI_HOME: home,
+		// The upstream keychain entry does not follow GEMINI_HOME.
+		[FORCE_FILE_STORAGE_ENV]: "1",
+	};
+}
+
+export function providerAcpEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	return fileBackedAcpEnvironment(path.resolve(resolveConfigRoot(), "gemini"), env);
+}
+
+export function providerAcpDirectory(): string {
+	return resolveAntigravityAcpDirectory(providerAcpEnvironment());
+}
 
 const SECURITY_CLI = "/usr/bin/security";
 const KEYCHAIN_LOOKUP_TIMEOUT_MS = 3_000;
