@@ -1,15 +1,18 @@
 import { normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai/models";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { AcpSessionStore } from "../src/acp/session-store.js";
+import { createAntigravityProvider } from "../src/provider.js";
 import {
 	AntigravityRuntime,
+	MANAGED_AUTH_MARKER,
 	PERMISSION_RESULT_KIND,
 	PERMISSION_TOOL_NAME,
 } from "../src/runtime.js";
@@ -48,72 +51,143 @@ describe("AntigravityRuntime", () => {
 		}
 	});
 
-	it("recognizes Gemini CLI's advertised Google login method", async () => {
+	it("keeps sessions that only read models, quota or auth out of the user's workspace", async () => {
+		// agy writes files such as skills/system/ into the cwd of each session it opens.
+		const agentDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-utility-cwd-")));
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		const cwds: { connection: string; session: string }[] = [];
+		const runtime = new AntigravityRuntime((options) => {
+			const connection = new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, "browser-auth"] });
+			const newSession = connection.newSession.bind(connection);
+			connection.newSession = (cwd, ...rest) => {
+				cwds.push({ connection: options.cwd, session: cwd });
+				return newSession(cwd, ...rest);
+			};
+			return connection;
+		});
+		const utilityCwd = path.join(agentDir, "antigravity-acp-provider", "utility-cwd");
+		try {
+			await runtime.discoverModels("test-key");
+			await runtime.verifyApiKey("test-key");
+			await runtime.loginGoogle();
+			await runtime.quota("test-key");
+			expect(cwds).toEqual(Array.from({ length: 4 }, () => ({ connection: utilityCwd, session: utilityCwd })));
+			expect(fs.statSync(utilityCwd).isDirectory()).toBe(true);
+
+			cwds.length = 0;
+			const turn = runtime.stream(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { apiKey: "test-key", sessionId: "workspace-session" });
+			for await (const _event of turn.stream) void _event;
+			expect(cwds).toEqual([{ connection: process.cwd(), session: process.cwd() }]);
+		} finally {
+			await runtime.close();
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			fs.rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not report Google login success if the server saves no token", async () => {
 		const runtime = new AntigravityRuntime(
 			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
 		);
 		try {
-			await expect(runtime.loginGoogle()).resolves.toBeUndefined();
+			await expect(runtime.loginGoogle()).rejects.toThrow("did not save a Google login");
 		} finally {
 			await runtime.close();
 		}
 	});
 
-	it("relays Google login through Pi on a headless host", async () => {
-		const previousMode = process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE;
-		process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE = "manual";
-		const runtime = new AntigravityRuntime(
-			(options) =>
-				new AntigravityAcpConnection({
-					...options,
-					command: process.execPath,
-					args: [fakeAgent, "headless-auth"],
-				}),
-		);
-		let shownUrl: string | undefined;
-		try {
-			await runtime.loginGoogle(undefined, undefined, {
-				showAuthorizationUrl(url) {
-					shownUrl = url;
-				},
-				promptForCallback: async () => {
-					if (!shownUrl) throw new Error("authorization URL was not shown");
-					const authorization = new URL(shownUrl);
-					const redirect = authorization.searchParams.get("redirect_uri");
-					const state = authorization.searchParams.get("state");
-					if (!redirect || !state) throw new Error("authorization URL is incomplete");
-					return `${redirect}?state=${encodeURIComponent(state)}&code=fake-code`;
-				},
+	it.skipIf(process.platform === "win32")("switches Google accounts after Pi logout without touching another profile", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-switch-account-"));
+		const agent = path.join(root, "pi");
+		const shared = path.join(root, "shared");
+		const token = path.join(agent, "antigravity-acp-provider", "gemini", "antigravity-acp", "acp_token.json");
+		const sharedToken = path.join(shared, "antigravity-acp", "acp_token.json");
+		fs.mkdirSync(path.dirname(sharedToken), { recursive: true });
+		fs.writeFileSync(sharedToken, '{"refresh_token":"other-client"}');
+		vi.stubEnv("PI_CODING_AGENT_DIR", agent);
+		vi.stubEnv("GEMINI_HOME", shared);
+		vi.stubEnv("GEMINI_API_KEY", undefined);
+		vi.stubEnv("PI_ANTIGRAVITY_ACP_OAUTH_MODE", "manual");
+		const runtime = new AntigravityRuntime((options) => {
+			expect(options.env?.AGY_ACP_FORCE_FILE_STORAGE).toBe("1");
+			return new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, "headless-auth"] });
+		});
+		const { provider } = createAntigravityProvider(runtime);
+		const models = createModels();
+		models.setProvider(provider);
+		function login(account: string) {
+			let authorization: URL | undefined;
+			const prompt = vi.fn(async () => {
+				expect(authorization?.hostname).toBe("accounts.google.com");
+				expect(authorization?.searchParams.get("prompt")).toContain("select_account");
+				return account;
 			});
-			expect(shownUrl).toMatch(/^https:\/\/accounts\.google\.com\//u);
+			return models.login(provider.id, "oauth", {
+				notify: (event) => {
+					if (event.type === "info" && event.links?.[0]) authorization = new URL(event.links[0].url);
+				},
+				prompt,
+			}).then(() => expect(prompt).toHaveBeenCalledOnce());
+		}
+		try {
+			await expect(models.getAuth(provider.id)).resolves.toBeUndefined();
+			await login("first-account");
+			const firstLogin = (await models.getAuth(provider.id))?.auth.apiKey;
+			expect(firstLogin).toMatch(new RegExp(`^${MANAGED_AUTH_MARKER}:`));
+			await models.logout(provider.id);
+			expect(fs.existsSync(token)).toBe(true);
+			await expect(models.getAuth(provider.id)).resolves.toBeUndefined();
+			await expect(models.checkAuth(provider.id)).resolves.toBeUndefined();
+			await login("second-account");
+			expect((await models.getAuth(provider.id))?.auth.apiKey).not.toBe(firstLogin);
+			expect(JSON.parse(fs.readFileSync(token, "utf8"))).toEqual({ refresh_token: "second-account" });
+			await runtime.logout();
+			expect(fs.existsSync(token)).toBe(false);
+			await expect(models.getAuth(provider.id)).rejects.toThrow("OAuth auth derivation failed");
+			expect(fs.readFileSync(sharedToken, "utf8")).toBe('{"refresh_token":"other-client"}');
 		} finally {
 			await runtime.close();
-			if (previousMode === undefined) delete process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE;
-			else process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE = previousMode;
+			vi.unstubAllEnvs();
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("does not prompt when headless login reuses cached authentication", async () => {
-		const previousMode = process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE;
-		process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE = "manual";
-		const runtime = new AntigravityRuntime(
-			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
-		);
-		const progress: string[] = [];
+	it("does not reuse Google connections, saved sessions, or quota after logout falls back to an API key", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-acp-auth-fallback-"));
+		vi.stubEnv("PI_CODING_AGENT_DIR", root);
+		vi.stubEnv("PI_ANTIGRAVITY_ACP_OAUTH_MODE", "browser");
+		vi.stubEnv("GEMINI_API_KEY", "fixture-key");
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({
+			...options, command: process.execPath, args: [fakeAgent, "browser-auth"],
+		}), "yolo", store);
+		const { provider } = createAntigravityProvider(runtime);
+		const models = createModels();
+		models.setProvider(provider);
+		const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+		const run = (sessionId: string) => models.streamSimple(model, context, { sessionId }).result();
+		async function quota() { return runtime.quota((await models.getAuth(provider.id))?.auth.apiKey); }
 		try {
-			await runtime.loginGoogle(undefined, (message) => progress.push(message), {
-				showAuthorizationUrl() {
-					throw new Error("cached authentication unexpectedly showed a URL");
-				},
-				promptForCallback: async () => {
-					throw new Error("cached authentication unexpectedly prompted");
-				},
-			});
-			expect(progress).toContain("Antigravity reused the saved Google login.");
+			await models.login(provider.id, "oauth", { notify() {}, prompt: async () => { throw new Error("unexpected prompt"); } });
+			for (const sessionId of ["warm", "saved"]) {
+				expect((await run(sessionId)).content).toEqual([{ type: "text", text: "Google account" }]);
+			}
+			await runtime.closeSession("saved");
+			expect(store.get("saved")?.credentialId).toContain(MANAGED_AUTH_MARKER);
+			expect((await quota()).groups[0]?.displayName).toBe("Google account");
+			await models.logout(provider.id);
+			for (const sessionId of ["warm", "saved"]) {
+				expect((await run(sessionId)).content).toEqual([{ type: "text", text: "API key" }]);
+			}
+			expect((await runtime.snapshot()).processes.map((item) => item.restored)).toEqual([false, false]);
+			expect(store.get("saved")?.credentialId).toMatch(/^api-key:[a-f0-9]{64}$/u);
+			expect((await quota()).groups[0]?.displayName).toBe("API key");
 		} finally {
 			await runtime.close();
-			if (previousMode === undefined) delete process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE;
-			else process.env.PI_ANTIGRAVITY_ACP_OAUTH_MODE = previousMode;
+			vi.unstubAllEnvs();
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 

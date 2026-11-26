@@ -68,6 +68,7 @@ export interface FakeContext {
 	cwd: string;
 	hasUI: true;
 	sessionManager: { getSessionId(): string };
+	modelRegistry: { getApiKeyForProvider: ReturnType<typeof vi.fn<(provider: string) => Promise<string | undefined>>> };
 	ui: { select: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
 }
 
@@ -76,6 +77,7 @@ export function createFakeContext(options: { sessionId: string; cwd?: string; se
 		cwd: options.cwd ?? process.cwd(),
 		hasUI: true,
 		sessionManager: { getSessionId: () => options.sessionId },
+		modelRegistry: { getApiKeyForProvider: vi.fn(async () => "test-key") },
 		ui: {
 			select: vi.fn(async (_title: string, labels: string[]) => options.selectAnswer?.(labels)),
 			notify: vi.fn(),

@@ -61,6 +61,11 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 		medium: "gemini-4-argon-medium",
 		high: "gemini-4-argon-high",
 	}),
+	reasoningModel("gemini-4-neon", "Gemini 4 Neon", {
+		low: "gemini-4-neon-low",
+		medium: "gemini-4-neon-medium",
+		high: "gemini-4-neon-high",
+	}),
 	reasoningModel("gemini-4-carbon", "Gemini 4 Carbon", {
 		low: "gemini-4-carbon-low",
 		medium: "gemini-4-carbon-medium",
@@ -176,6 +181,25 @@ export function splitEffortSuffix(modelId: string): { base: string; effort: Mode
 	return { base: match[1], effort: match[2] as ModelEffort };
 }
 
+function matchesAcpFamily(modelId: string, variant: string): boolean {
+	const base = splitEffortSuffix(modelId)?.base ?? modelId;
+	return !base.startsWith("gemini-4-") || (splitEffortSuffix(variant)?.base ?? variant) === base;
+}
+
+export function modelForAcpStream(
+	model: Model<typeof API_ID>, catalog: readonly Model<typeof API_ID>[],
+): Model<typeof API_ID> {
+	// Pi's custom-ID fallback clones another model's metadata before background discovery.
+	const discovered = catalog.find((entry) => entry.id === model.id);
+	if (!discovered) return model;
+	const supplied = Object.values(model.thinkingLevelMap ?? {}).filter((value) => typeof value === "string");
+	const advertised = new Set(Object.values(discovered.thinkingLevelMap ?? {}));
+	if (supplied.length && supplied.every((id) => advertised.has(id))) return model;
+	const { thinkingLevelMap: _stale, ...base } = model;
+	return { ...base, reasoning: discovered.reasoning,
+		...(discovered.thinkingLevelMap && { thinkingLevelMap: discovered.thinkingLevelMap }) };
+}
+
 /** Resolve Pi's current reasoning level to the exact model ID advertised by
  * Antigravity. Unsupported programmatic levels clamp to the nearest tier. */
 export function resolveAcpModelId(
@@ -202,7 +226,7 @@ export function resolveAcpModelId(
 					: ["medium", "high", "low"];
 	for (const effort of order) {
 		const value = map[effort];
-		if (typeof value === "string" && value) return value;
+		if (typeof value === "string" && value && matchesAcpFamily(model.id, value)) return value;
 	}
 	return model.id;
 }

@@ -2,47 +2,41 @@
 
 ## Supported versions
 
-- Pi 1.5.x; both Pi development packages are pinned together to 1.5.2.
-- Node.js 22.19.0 and 24 are checked in CI. Node declarations track the 24.x line.
-- ACP SDK 2.6.0 / protocol 1 (not experimental ACP v2), using the full-v1 `/unstable` entrypoint for draft usage and session lifecycle fields. Both stable configuration selectors and older official Antigravity model APIs are supported and validated.
-- Host-provided Pi packages remain wildcard peers and are not bundled, following Pi's package contract. The README's compatibility statement defines tested support.
+- Pi 1.5.x+; development packages (`@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent`) are pinned together.
+- Node.js 22.19.0 and 24 are checked in CI; `@types/node` tracks the 24.x line.
+- ACP SDK 2.8.0 / protocol 1 (not experimental ACP v2), using the full-v1 `/unstable` entrypoint for draft usage and session lifecycle fields. Both stable configuration selectors and legacy Antigravity model APIs are supported and validated.
+- Host-provided Pi packages remain `*` peer dependencies per Pi's package contract.
 
 ## Dependency updates
 
-Dependabot runs weekly for npm and GitHub Actions. Pi updates are grouped to avoid mismatched `pi-ai` / `pi-coding-agent` versions. Compatible minor/patch updates are grouped; major updates require individual review.
+Dependabot runs weekly for npm and GitHub Actions. Pi packages are grouped so `pi-ai` and `pi-coding-agent` stay matched. Minor/patch updates are grouped; major updates require individual review.
 
-Before merging, require the Node 22.19.0 and 24 checks: typecheck, tests, pack dry run, an isolated packed-install smoke test, and full `npm audit --audit-level=moderate`. Audit findings describe dependency advisories, not proof that the provider exposes every affected code path. Do not use `npm audit fix --force` as a substitute for compatibility work.
+Before merging, require Node 22.19.0 and 24 checks: typecheck, unit tests, pack dry run, isolated packed-install smoke test, and `npm audit --audit-level=moderate`. Do not use `npm audit fix --force` as a substitute for compatibility work.
 
-Pi 1.5.2 pins patched Undici 8.12.3 and minimatch 11.0.3, so the former development-tree Undici override is no longer needed. The lockfile also selects patched `@hono/node-server` 2.1.6. These development dependencies do not patch a user's separately installed Pi host; keep the host's dependencies updated as well.
-
-ACP SDK 2.x removes `ClientSideConnection`. The provider uses `client().onRequest(...).onNotification(...).connect(...)`, peer-context requests/notifications, and explicit SDK lifecycle shutdown. All protocol imports use `@agentclientprotocol/sdk/unstable` consistently because draft prompt usage and session lifecycle fields are not part of the default stable-only profile. This is still ACP v1, not draft v2; pin SDK updates and retain model-selection, usage, cancellation, permission and transport regression coverage. See [ACP-SDK-MIGRATION.md](ACP-SDK-MIGRATION.md).
-
-TypeScript 7.0.2 is supported. The multiprocess session-store tests bundle the actual implementation with explicitly declared esbuild, avoiding removed compiler APIs while retaining independent process lock contention. Node 26 declarations are intentionally excluded until that runtime is supported.
+Pin ACP SDK updates and keep model-selection, usage, cancellation, permission, and transport regression coverage passing.
 
 ## Profiles
 
-`PI_CODING_AGENT_DIR` selects provider configuration and saved ACP bindings. Initial configuration migration copies only permission/update settings, preserves the source, and never overwrites an existing target. Sessions are not migrated. Antigravity's own credentials and managed runtime are still shared; a Pi profile is not an Antigravity account sandbox.
+`PI_CODING_AGENT_DIR` isolates provider configuration, saved ACP bindings, and per-profile Google credentials (`$PI_CODING_AGENT_DIR/antigravity-acp-provider/gemini/antigravity-acp/`). Initial configuration migration copies only permission/update settings, preserves the source, and never overwrites an existing target. Sessions and credentials are not copied. The managed ACP runtime installation under `~/.local/opt/agy-acp/` is shared across Pi profiles.
 
 ## Release checklist
 
-1. Merge changes only after both CI checks pass on the current main base.
-2. Bump `package.json` and the lockfile together, update release notes, and merge the release PR.
-3. Re-run checks, packed install, and full audit from a clean install. Exercise npm 12 packaging as well as the bundled npm CLI.
-4. Create an annotated `v<version>` tag on that exact main commit and push it. The existing publish workflow uses npm trusted publishing/OIDC; do not introduce a long-lived npm token.
-5. Verify the publish workflow, npm version, and GitHub release. Authenticated prompt/cancellation qualification is opt-in and must be explicitly requested; PR CI does not use real Google credentials.
+1. Merge changes only after both CI checks pass on the current `main` base.
+2. Bump `package.json` and `package-lock.json` together and merge the release PR.
+3. Re-run `npm run check`, `npm run test:packed`, and `npm audit --audit-level=moderate` from a clean install.
+4. Create an annotated `v<version>` tag on that exact `main` commit and push it. The publish workflow uses npm trusted publishing (OIDC); do not introduce a long-lived npm token.
+5. Verify the publish workflow, npm version, and GitHub release notes. Live authenticated tests are opt-in and never run in PR CI.
 
 ## Protected runtime publication
 
-The `main CI` ruleset requires a PR, an up-to-date base, successful `Check (22.19.0)` and `Check (24)` jobs from GitHub Actions, linear history, and no force pushes or deletion. No actor bypasses these rules. The older disabled `gitrules` ruleset remains unchanged.
+The `main` ruleset requires PRs, an up-to-date base, passing `Check (22.19.0)` and `Check (24)` jobs, linear history, resolved review threads, and no force pushes or deletion.
 
-The daily updater publishes only `runtime-manifest.json` on a unique automation branch. It opens a PR, refreshes its base, explicitly dispatches `ci.yml`, verifies both real CI jobs on that exact head, and squash-merges through normal protection. Bot-token PR workflows are held for approval under GitHub's current policy. A separate dispatch-only CI reporting job therefore records each actual validation job's result and URL on the exact tested commit; missing/failed jobs are never reported as successful. Failed checks leave the signed PR open for inspection; no fabricated passes or direct main pushes are used.
+The daily updater (`update-runtime-manifest.yml`) updates only `runtime-manifest.json` on an automation branch, opens a PR, explicitly dispatches `ci.yml`, verifies both CI jobs on that exact head, and squash-merges through normal protection. Because bot-token PR workflows are held for approval, a dispatch-only reporting job records each validation job's real result and URL on the tested commit. Signing keys are removed from runner temporary storage immediately after signing.
 
-Repository Actions settings must allow GitHub Actions to create PRs. Default token permissions and validation-job tokens remain read-only. Only the updater grants `contents`, `pull-requests`, and `actions` write permissions; the dispatch-only reporting job has `statuses: write` and read access to Actions metadata. It never approves reviews and needs no PAT, installed app bypass, or auto-merge exemption. Signing keys are removed from runner temporary storage after signing.
-
-Validate the bot path without new artifact downloads or a signing key:
+Validate the bot publication path without downloading artifacts or using a signing key:
 
 ```bash
 gh workflow run update-runtime-manifest.yml -f publication_test=true
 ```
 
-This changes only whitespace around the existing valid signed catalog, dispatches both checks, then closes the PR without changing main. To verify the complete protected merge path, also pass `-f merge_publication_test=true`; only whitespace changes, never the signature payload or approved runtime releases.
+Pass `-f merge_publication_test=true` to also exercise the protected merge path (whitespace-only change; signature payload and approved releases stay identical).
