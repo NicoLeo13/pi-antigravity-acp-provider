@@ -34,4 +34,4 @@ Files are created with mode 0600 in a 0700 directory on POSIX. Each file stops a
 
 `doctor --verbose` still exposes the existing bounded, redacted **in-memory** stderr tail for live processes. That tail is not copied into these logs. Review any diagnostics before sharing them, particularly verbose stderr, and never publish credential files or raw ACP traffic.
 
-Diagnostics do not change retry limits, permission policy, runtime selection, concurrency, or prompt deadlines. They make future stalls observable; they do not claim to fix the platform/account-specific latency reported in issue #118.
+Diagnostics do not change retry limits, permission policy, runtime selection, concurrency, or prompt deadlines; they only make stalls and phase timings observable.

@@ -1,5 +1,4 @@
 import type {
-	Api,
 	ApiStreamOptions,
 	AssistantMessageEventStream,
 	TranscriptContext,
@@ -160,5 +159,3 @@ function stream(
 ): AssistantMessageEventStream {
 	return runtime.stream(model, context, options as SimpleStreamOptions | undefined).stream;
 }
-
-export const ANTIGRAVITY_ACP_API = "antigravity-acp" satisfies Api;

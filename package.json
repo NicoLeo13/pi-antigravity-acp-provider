@@ -47,7 +47,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:real-acp": "PI_ANTIGRAVITY_ACP_REAL=1 vitest run test/real-cli.test.ts",
-    "test:real-cli": "npm run test:real-acp",
     "test:live": "PI_ANTIGRAVITY_ACP_LIVE=1 vitest run test/live-authenticated.test.ts",
     "test:qualify": "PI_ANTIGRAVITY_ACP_QUALIFY=1 vitest run test/live-qualification.test.ts",
     "check": "npm run typecheck && npm test",

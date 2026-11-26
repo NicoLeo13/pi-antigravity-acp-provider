@@ -61,9 +61,9 @@ export function boundedNdjsonStream(
 			} catch (cause) {
 				const error = cause instanceof Error ? cause : new Error(String(cause));
 				options.onProtocolError?.(error);
-				// ACP SDK 0.16.1 starts its receive loop without observing the
-				// returned promise. Closing lets its loop settle cleanly while the
-				// connection races requests against onProtocolError.
+				// The ACP SDK starts its receive loop without observing the returned
+				// promise. Closing lets its loop settle cleanly while the connection
+				// races requests against onProtocolError.
 				if (options.closeOnProtocolError) controller.close();
 				else controller.error(error);
 			} finally {

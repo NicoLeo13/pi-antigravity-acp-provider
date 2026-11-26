@@ -50,8 +50,6 @@ export function resolveLegacyGeminiConfigPath(): string {
 export const DEFAULT_CONFIG_PATH = resolveDefaultPiConfigPath();
 export const LEGACY_GEMINI_CONFIG_PATH = resolveLegacyGeminiConfigPath();
 
-export const CONFIG_PATH = resolveConfigPath();
-
 export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 	if (file === resolveConfigPath()) migrateConfig(file);
 	try {
