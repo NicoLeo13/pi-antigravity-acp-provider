@@ -66,6 +66,7 @@ const COLON_COMMANDS = [
 	{ name: "qualify", description: "Run the auth and model-availability qualification wizard" },
 	{ name: "permissions", description: "Set the Antigravity permission mode (default, auto-edit, yolo)" },
 	{ name: "tool-activity", description: "Show, hide or expand Antigravity tool progress" },
+	{ name: "tool-bridge", description: "Set the Pi MCP tool bridge policy (ecosystem or all)" },
 	{ name: "doctor", description: "Show runtime, auth and binding diagnostics (--verbose for stderr)" },
 	{ name: "status", description: "Show provider status and diagnostics" },
 ] as const;

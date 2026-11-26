@@ -98,6 +98,7 @@ describe("extension entry point", () => {
 			"antigravity-acp:qualify",
 			"antigravity-acp:permissions",
 			"antigravity-acp:tool-activity",
+			"antigravity-acp:tool-bridge",
 			"antigravity-acp:doctor",
 			"antigravity-acp:status",
 			"gemini-acp",
