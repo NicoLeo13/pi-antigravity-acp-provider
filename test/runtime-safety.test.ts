@@ -110,6 +110,34 @@ describe("permission policy and lifecycle", () => {
 	});
 });
 
+describe("early lifecycle and setup cancellation", () => {
+	it.each(["initialize-timeout", "session-timeout"])("starts before slow %s and stays cancellable", async (scenario) => {
+		const { runtime, connections, entries } = setup(scenario);
+		const controller = new AbortController();
+		const writer = runtime.stream(model, { messages: [user("hello")] }, { sessionId: "early-start", signal: controller.signal });
+		const iterator = writer.stream[Symbol.asyncIterator]();
+		expect((await iterator.next()).value).toMatchObject({ type: "start", partial: { content: [] } });
+		await vi.waitFor(() => expect(entries().some((entry) => entry.method === (scenario === "session-timeout" ? "session/new" : "initialize"))).toBe(true));
+		controller.abort();
+		const events = [];
+		for (;;) { const next = await iterator.next(); if (next.done) break; events.push(next.value); }
+		expect(events.map((event) => event.type)).toEqual(["error"]);
+		expect(writer.message.stopReason).toBe("aborted");
+		expect(writer.message.content).toEqual([]);
+		await vi.waitFor(() => expect(connections[0]!.process.alive).toBe(false));
+	});
+
+	it("does not start work for a pre-aborted request", async () => {
+		const { runtime, connections } = setup();
+		const controller = new AbortController(); controller.abort();
+		const writer = runtime.stream(model, { messages: [user("hello")] }, { signal: controller.signal });
+		const events = [];
+		for await (const event of writer.stream) events.push(event.type);
+		expect(events).toEqual(["error"]);
+		expect(connections).toHaveLength(0);
+	});
+});
+
 describe("context size from usage_update", () => {
 	it.each([
 		["usage multi", false, 1076000, 0, 8192],

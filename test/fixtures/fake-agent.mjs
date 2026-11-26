@@ -70,6 +70,9 @@ for await (const line of rl) {
 		send({ jsonrpc: "2.0", id: permissionPromptId, result: { stopReason: "end_turn" } });
 		permissionPromptId = undefined;
 	} else if (method === "initialize") {
+		if (scenario === "diagnostic-signals") {
+			process.stderr.write("HTTP 429 RESOURCE_EXHAUSTED retrying in 2s authorization: Bearer TEST_SECRET prompt=PRIVATE_PROMPT\nSyntaxWarning: PRIVATE_FILE_CONTENT\n");
+		}
 		if (scenario === "initialize-timeout") continue;
 		if (scenario === "malformed-output") {
 			process.stdout.write("not-json\n");

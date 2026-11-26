@@ -152,6 +152,10 @@ CI checks Node 22.19.0 and 24, including typechecking, unit tests, packed instal
 
 ### Turn progress and recovery
 
+Valid provider requests emit Pi's `start` lifecycle event before runtime setup, with empty assistant content. It means the request was accepted, not that setup finished or model output began; text/thinking/tool events still reflect actual agent activity. Pre-aborted or invalid requests can fail without a start event.
+
+Set `PI_ANTIGRAVITY_ACP_DEBUG=1` before launching Pi to persist private, bounded JSONL diagnostics under `$PI_CODING_AGENT_DIR/antigravity-acp-provider/debug/`. They record phase timings, recognized runtime identity, classified errors/retries/stderr signals, cancellation, and exit—not raw ACP payloads or stderr. Live status/doctor lists each binding's log path. Files stop at 256 KiB; retention keeps the ten newest owned files on a best-effort basis. See [diagnostic privacy, limits, and interpretation](docs/DIAGNOSTICS.md).
+
 Prompts are bounded by inactivity, not total turn duration: streaming progress resets a 10-minute idle window. An outstanding native tool, parked Pi tool, or permission request gets a **finite 60-minute no-progress window** instead, so long work survives the former two-minute Pi-tool deadline without making stuck tools wait forever. Cancellation still sends `session/cancel`, answers parked requests, and closes an unresponsive agent after its 1.5-second grace period. The interactive permission broker retains its two-minute response limit. Integrations can override `promptIdleTimeoutMs` and `promptWorkIdleTimeoutMs` in connection options with positive finite durations; initialize/auth/session-setup deadlines are unchanged.
 
 Antigravity 1.4.5 also has its own three-minute MCP call deadline, independent of the provider's watchdog. If the ACP prompt ends while Pi is still executing a tool, the provider releases the abandoned ACP requests. A late Pi result is then included in a new prompt instead of leaving Pi waiting on an already-ended continuation; cancellation remains available. This recovery does not extend Antigravity's MCP deadline.

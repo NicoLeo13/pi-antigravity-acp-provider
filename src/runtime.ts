@@ -155,6 +155,7 @@ export interface RuntimeSnapshot {
 		restored: boolean;
 		ignoredStdoutNoiseLines: number;
 		stderrTail?: string;
+		diagnosticsPath?: string;
 	}>;
 }
 
@@ -215,6 +216,8 @@ export class AntigravityRuntime {
 				tools: getCurrentTools(transcript.messages),
 			};
 			currentSystemInstructions(resolvedContext);
+			if (options.signal?.aborted) throw abortError();
+			writer.start();
 			void this.runQueued(model, resolvedContext, options, writer)
 				.then(() => {
 					if (!writer.finished) {
@@ -490,6 +493,7 @@ export class AntigravityRuntime {
 					restored: binding.restored,
 					ignoredStdoutNoiseLines: binding.connection.process.ignoredStdoutNoiseLines,
 					...(includeStderr ? { stderrTail: binding.connection.process.stderrTail } : {}),
+					...(binding.connection.diagnosticsPath ? { diagnosticsPath: binding.connection.diagnosticsPath } : {}),
 				};
 			}),
 		);
@@ -904,7 +908,7 @@ export class AntigravityRuntime {
 			},
 		}, apiKey);
 		try {
-			const initialize = await connection.initialize();
+			const initialize = await connection.initialize(signal);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			this.assertSessionEpoch(key, epoch, sessionEpoch);
