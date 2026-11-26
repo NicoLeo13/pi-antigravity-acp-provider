@@ -31,14 +31,14 @@ function setup(
 	scenario?: string,
 	mode: PermissionMode = "yolo",
 	store?: AcpSessionStore,
-	runtimeOptions?: { maxBindings?: number; idleMs?: number },
+	runtimeOptions?: { maxBindings?: number; idleMs?: number; modeIds?: string[]; restoredModeIds?: string[]; emitModeUpdates?: boolean },
 ) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-safety-")); roots.push(root);
 	const log = path.join(root, "calls.jsonl"); fs.writeFileSync(log, "");
 	const connections: AntigravityAcpConnection[] = [];
 	const runtime = new AntigravityRuntime((options) => {
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...options.env, FAKE_AGENT_LOG_FILE: log } });
+			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...options.env, FAKE_AGENT_LOG_FILE: log, FAKE_AGENT_MODE_IDS: runtimeOptions?.modeIds?.join(","), FAKE_AGENT_RESTORED_MODE_IDS: runtimeOptions?.restoredModeIds?.join(","), ...(runtimeOptions?.emitModeUpdates ? { FAKE_AGENT_EMIT_MODE_UPDATES: "1" } : {}) } });
 		connections.push(connection); return connection;
 	}, mode, store, runtimeOptions);
 	runtimes.push(runtime);
@@ -135,6 +135,65 @@ describe("early lifecycle and setup cancellation", () => {
 		for await (const event of writer.stream) events.push(event.type);
 		expect(events).toEqual(["error"]);
 		expect(connections).toHaveLength(0);
+	});
+});
+
+describe("host permission mode negotiation", () => {
+	const hostModes = ["default", "accept-edits", "auto", "plan"];
+
+	it.each([undefined, "config-options"])("confirms the advertised edit-policy alias (%s)", async (scenario) => {
+		const { runtime, entries } = setup(scenario, "auto_edit", undefined, { modeIds: hostModes });
+		expect((await turn(runtime, [user("hello")])).stopReason).toBe("stop");
+		expect(entries().find((entry) => entry.method === "session/prompt")?.mode).toBe("accept-edits");
+		expect((await runtime.snapshot()).processes[0]).toMatchObject({ confirmedPermissionMode: "auto_edit", confirmedAcpModeId: "accept-edits" });
+	});
+
+	it("does not silently substitute auto or default for yolo", async () => {
+		const { runtime, entries } = setup("config-options", "yolo", undefined, { modeIds: hostModes });
+		const message = await turn(runtime, [user("hello")]);
+		expect(message.errorMessage).toContain("Advertised modes: default, accept-edits, auto, plan");
+		expect(message.errorMessage).toContain("/antigravity-acp permissions default");
+		expect(entries().some((entry) => entry.method === "session/prompt")).toBe(false);
+	});
+
+	it.each([undefined, "config-options"])("changes a warm session to the alias and back to default with update notifications (%s)", async (scenario) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-warm-mode-update-")); roots.push(root);
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const { runtime, connections } = setup(scenario, "default", store, { modeIds: hostModes, emitModeUpdates: true });
+		await turn(runtime, [user("hello")]);
+		const pid = (await runtime.snapshot()).processes[0]?.pid;
+		await runtime.setPermissionMode("auto_edit");
+		expect((await runtime.snapshot()).processes[0]).toMatchObject({ pid, alive: true, confirmedPermissionMode: "auto_edit", confirmedAcpModeId: "accept-edits" });
+		expect(store.get("safety")).toBeDefined();
+		await runtime.setPermissionMode("default");
+		expect((await runtime.snapshot()).processes[0]).toMatchObject({ pid, alive: true, confirmedPermissionMode: "default", confirmedAcpModeId: "default" });
+		expect(connections).toHaveLength(1);
+	});
+
+	it("rejects an ignored alias selection", async () => {
+		const { runtime, entries } = setup("config-options-ignored-mode", "auto_edit", undefined, { modeIds: hostModes });
+		expect((await turn(runtime, [user("hello")])).errorMessage).toContain("did not confirm");
+		expect(entries().some((entry) => entry.method === "session/prompt")).toBe(false);
+	});
+
+	it("rejects unexpected drift away from the confirmed alias", async () => {
+		const { runtime } = setup("config-options-mode-drift", "auto_edit", undefined, { modeIds: hostModes });
+		expect((await turn(runtime, [user("hello")])).errorMessage).toContain("permission mode unexpectedly");
+	});
+
+	it("renegotiates restored aliases and removes unsupported saved bindings", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-alias-restore-")); roots.push(root);
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const first = setup("config-options", "auto_edit", store, { modeIds: hostModes });
+		const response = await turn(first.runtime, [user("hello")]);
+		await first.runtime.close();
+		const restored = setup("config-options", "auto_edit", store, { modeIds: hostModes });
+		expect((await turn(restored.runtime, [user("hello"), response, user("next", 2)])).stopReason).toBe("stop");
+		expect((await restored.runtime.snapshot()).processes[0]).toMatchObject({ restored: true, confirmedAcpModeId: "accept-edits" });
+		await restored.runtime.close();
+		const unsupported = setup("config-options", "auto_edit", store, { modeIds: hostModes, restoredModeIds: ["default", "auto", "plan"] });
+		expect((await turn(unsupported.runtime, [user("hello"), response, user("next", 2)])).errorMessage).toContain("restored session did not advertise");
+		expect(store.get("safety")).toBeUndefined();
 	});
 });
 
