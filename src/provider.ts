@@ -1,5 +1,4 @@
 import type {
-	Api,
 	ApiStreamOptions,
 	AssistantMessageEventStream,
 	TranscriptContext,
@@ -9,9 +8,10 @@ import type {
 	SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 
-import { hasAntigravityAuth } from "./acp/antigravity.js";
-import { FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.js";
-import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
+import { AntigravityAcpError } from "./acp/errors.js";
+import { hasSavedGoogleLogin, isGoogleLoginMarker, newGoogleLoginMarker } from "./auth.js";
+import { FALLBACK_MODELS, modelForAcpStream, projectModels, PROVIDER_ID, restoreModels } from "./models.js";
+import { AntigravityRuntime } from "./runtime.js";
 
 export interface AntigravityProviderBundle {
 	provider: Provider<"antigravity-acp">;
@@ -49,20 +49,20 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 								}),
 						},
 					);
+					const marker = newGoogleLoginMarker();
 					return {
 						type: "oauth",
-						// Pi needs a durable credential record so the provider stays visible;
-						// the actual OAuth tokens remain owned by Google Antigravity.
-						refresh: MANAGED_AUTH_MARKER,
-						access: MANAGED_AUTH_MARKER,
+						// The marker identifies the login without copying Google's tokens into Pi's auth store.
+						refresh: marker,
+						access: marker,
 						expires: Number.MAX_SAFE_INTEGER,
 					};
 				},
 				async refresh(credential) {
 					return credential;
 				},
-				async toAuth() {
-					return { apiKey: MANAGED_AUTH_MARKER };
+				async toAuth(credential) {
+					return { apiKey: savedGoogleLogin(credential.access) };
 				},
 			},
 			apiKey: {
@@ -83,9 +83,6 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 				async check({ ctx, credential }) {
 					if (credential?.key) return { type: "api_key", source: "Pi auth store" };
 					if (await ctx.env("GEMINI_API_KEY")) return { type: "api_key", source: "GEMINI_API_KEY" };
-					if (hasAntigravityAuth()) {
-						return { type: "api_key", source: "Antigravity OAuth refresh token" };
-					}
 					return undefined;
 				},
 				async resolve({ ctx, credential }) {
@@ -96,24 +93,33 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 							source: credential?.key ? "Pi auth store" : "GEMINI_API_KEY",
 						};
 					}
-					if (hasAntigravityAuth()) {
-						return { auth: { apiKey: MANAGED_AUTH_MARKER }, source: "Antigravity OAuth refresh token" };
-					}
 					return undefined;
 				},
 			},
 		},
 		getModels: () => models,
 		async refreshModels(context: RefreshModelsContext) {
-			if (!context.allowNetwork) return;
-			const key =
-				context.credential?.type === "api_key"
-					? context.credential.key
-					: context.credential?.type === "oauth"
-						? MANAGED_AUTH_MARKER
-						: undefined;
+			if (!context.allowNetwork) {
+				// Restore the last discovered catalog before Pi resolves startup model
+				// patterns, so models outside the offline fallback stay selectable.
+				const restored = restoreModels(context.stored?.models ?? []);
+				if (restored.length === 0) return;
+				await context.publish({
+					update: () => {
+						models = restored;
+					},
+				});
+				return;
+			}
 			let discovered;
 			try {
+				const key =
+					context.credential?.type === "oauth"
+						? savedGoogleLogin(context.credential.access)
+						: context.credential?.type === "api_key"
+							? context.credential.key
+							: process.env.GEMINI_API_KEY?.trim();
+				if (!key) return;
 				discovered = projectModels(await runtime.discoverModels(key, context.signal));
 			} catch {
 				// Startup refresh must not hide the conservative offline catalog when
@@ -122,19 +128,27 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 			}
 			if (discovered.length === 0) return;
 			await context.publish({
+				persist: { models: discovered, checkedAt: Date.now() },
 				update: () => {
 					models = discovered;
 				},
 			});
 		},
 		stream(model, context, options) {
-			return stream(runtime, model, context, options);
+			return stream(runtime, modelForAcpStream(model, models), context, options);
 		},
 		streamSimple(model, context, options) {
-			return stream(runtime, model, context, options);
+			return stream(runtime, modelForAcpStream(model, models), context, options);
 		},
 	};
 	return { provider, runtime };
+}
+
+function savedGoogleLogin(marker: string): string {
+	if (!isGoogleLoginMarker(marker) || !hasSavedGoogleLogin()) {
+		throw new AntigravityAcpError("auth", "No saved Google login for this Pi profile. Run /login antigravity-acp.");
+	}
+	return marker;
 }
 
 function stream(
@@ -145,5 +159,3 @@ function stream(
 ): AssistantMessageEventStream {
 	return runtime.stream(model, context, options as SimpleStreamOptions | undefined).stream;
 }
-
-export const ANTIGRAVITY_ACP_API = "antigravity-acp" satisfies Api;

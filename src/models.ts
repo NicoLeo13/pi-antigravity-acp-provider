@@ -61,6 +61,16 @@ export const FALLBACK_MODELS: readonly Model<typeof API_ID>[] = [
 		medium: "gemini-4-argon-medium",
 		high: "gemini-4-argon-high",
 	}),
+	reasoningModel("gemini-4-neon", "Gemini 4 Neon", {
+		low: "gemini-4-neon-low",
+		medium: "gemini-4-neon-medium",
+		high: "gemini-4-neon-high",
+	}),
+	reasoningModel("gemini-4-carbon", "Gemini 4 Carbon", {
+		low: "gemini-4-carbon-low",
+		medium: "gemini-4-carbon-medium",
+		high: "gemini-4-carbon-high",
+	}),
 	reasoningModel("gemini-3.7-flash", "Gemini 3.7 Flash", {
 		low: "gemini-3.7-flash-low",
 		medium: "gemini-3.7-flash-medium",
@@ -128,6 +138,37 @@ export function projectModels(models: readonly AcpModelInfo[]): Model<typeof API
 	return projected;
 }
 
+/** Rebuild a catalog persisted by an earlier discovery. Entries are rebuilt from
+ * their id, name and advertised tiers rather than trusted verbatim, so current
+ * cost rates and model limits apply and malformed or foreign entries are skipped. */
+export function restoreModels(stored: readonly unknown[]): Model<typeof API_ID>[] {
+	const restored: Model<typeof API_ID>[] = [];
+	const ids = new Set<string>();
+	for (const entry of stored) {
+		if (!entry || typeof entry !== "object") continue;
+		const candidate = entry as Partial<Model<typeof API_ID>>;
+		if (candidate.provider !== PROVIDER_ID || candidate.api !== API_ID) continue;
+		const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+		if (!validModelId(id) || ids.has(id)) continue;
+		const name = typeof candidate.name === "string" && candidate.name.trim() ? candidate.name.trim() : id;
+		if (candidate.reasoning === true) {
+			const variants: Variants = {};
+			for (const effort of ["low", "medium", "high", "xhigh"] as const) {
+				const value = candidate.thinkingLevelMap?.[effort];
+				if (typeof value === "string" && validModelId(value)) variants[effort] = value;
+			}
+			if (Object.keys(variants).length === 0) continue;
+			restored.push(reasoningModel(id, name, variants));
+		} else if (candidate.reasoning === false) {
+			restored.push(fixedModel(id, name));
+		} else {
+			continue;
+		}
+		ids.add(id);
+	}
+	return restored;
+}
+
 export type ModelEffort = "low" | "medium" | "high" | "xhigh";
 
 /** Antigravity advertises effort-qualified ids (`gemini-3.8-flash-high`) while the
@@ -138,6 +179,25 @@ export function splitEffortSuffix(modelId: string): { base: string; effort: Mode
 	const match = /^(.*)-(low|medium|high|xhigh)$/u.exec(modelId);
 	if (!match?.[1]) return undefined;
 	return { base: match[1], effort: match[2] as ModelEffort };
+}
+
+function matchesAcpFamily(modelId: string, variant: string): boolean {
+	const base = splitEffortSuffix(modelId)?.base ?? modelId;
+	return !base.startsWith("gemini-4-") || (splitEffortSuffix(variant)?.base ?? variant) === base;
+}
+
+export function modelForAcpStream(
+	model: Model<typeof API_ID>, catalog: readonly Model<typeof API_ID>[],
+): Model<typeof API_ID> {
+	// Pi's custom-ID fallback clones another model's metadata before background discovery.
+	const discovered = catalog.find((entry) => entry.id === model.id);
+	if (!discovered) return model;
+	const supplied = Object.values(model.thinkingLevelMap ?? {}).filter((value) => typeof value === "string");
+	const advertised = new Set(Object.values(discovered.thinkingLevelMap ?? {}));
+	if (supplied.length && supplied.every((id) => advertised.has(id))) return model;
+	const { thinkingLevelMap: _stale, ...base } = model;
+	return { ...base, reasoning: discovered.reasoning,
+		...(discovered.thinkingLevelMap && { thinkingLevelMap: discovered.thinkingLevelMap }) };
 }
 
 /** Resolve Pi's current reasoning level to the exact model ID advertised by
@@ -166,7 +226,7 @@ export function resolveAcpModelId(
 					: ["medium", "high", "low"];
 	for (const effort of order) {
 		const value = map[effort];
-		if (typeof value === "string" && value) return value;
+		if (typeof value === "string" && value && matchesAcpFamily(model.id, value)) return value;
 	}
 	return model.id;
 }

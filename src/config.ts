@@ -10,7 +10,7 @@ export interface AntigravityAcpConfig {
 	permissions: PermissionMode;
 	runtimeUpdates: RuntimeUpdateMode;
 	toolActivity: ToolActivityMode;
-	isolatedGeminiHome: boolean;
+	nativeWorkflows: boolean;
 }
 
 export function resolvePiAgentDir(): string {
@@ -25,6 +25,14 @@ export function resolvePiAgentDir(): string {
 
 export function resolveConfigRoot(): string {
 	return path.join(resolvePiAgentDir(), "antigravity-acp-provider");
+}
+
+// agy writes files (skills/system/…) into the cwd of a session. Sessions that only read
+// models, quota or auth use this folder, so they do not write into the user's workspace.
+export function resolveUtilityCwd(): string {
+	const dir = path.join(resolveConfigRoot(), "utility-cwd");
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return dir;
 }
 
 export function resolveConfigPath(): string {
@@ -42,8 +50,6 @@ export function resolveLegacyGeminiConfigPath(): string {
 export const DEFAULT_CONFIG_PATH = resolveDefaultPiConfigPath();
 export const LEGACY_GEMINI_CONFIG_PATH = resolveLegacyGeminiConfigPath();
 
-export const CONFIG_PATH = resolveConfigPath();
-
 export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 	if (file === resolveConfigPath()) migrateConfig(file);
 	try {
@@ -51,23 +57,18 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			permissions?: unknown;
 			runtimeUpdates?: unknown;
 			toolActivity?: unknown;
-			isolatedGeminiHome?: unknown;
+			nativeWorkflows?: unknown;
 		};
 		return {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
-			isolatedGeminiHome: typeof parsed.isolatedGeminiHome === "boolean" ? parsed.isolatedGeminiHome : false,
+			nativeWorkflows: parsed.nativeWorkflows === true,
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return {
-		permissions: "yolo",
-		runtimeUpdates: "automatic",
-		toolActivity: "compact",
-		isolatedGeminiHome: false,
-	};
+	return { permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", nativeWorkflows: false };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = resolveConfigPath()): void {
@@ -80,10 +81,6 @@ export function saveRuntimeUpdateMode(mode: RuntimeUpdateMode, file = resolveCon
 
 export function saveToolActivityMode(mode: ToolActivityMode, file = resolveConfigPath()): void {
 	writeConfig({ ...loadConfig(file), toolActivity: mode }, file);
-}
-
-export function saveIsolatedGeminiHome(enabled: boolean, file = resolveConfigPath()): void {
-	writeConfig({ ...loadConfig(file), isolatedGeminiHome: enabled }, file);
 }
 
 function writeConfig(config: AntigravityAcpConfig, file: string): void {

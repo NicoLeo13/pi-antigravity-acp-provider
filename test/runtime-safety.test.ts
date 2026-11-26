@@ -31,14 +31,14 @@ function setup(
 	scenario?: string,
 	mode: PermissionMode = "yolo",
 	store?: AcpSessionStore,
-	runtimeOptions?: { maxBindings?: number; idleMs?: number },
+	runtimeOptions?: { maxBindings?: number; idleMs?: number; modeIds?: string[]; restoredModeIds?: string[]; emitModeUpdates?: boolean },
 ) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-runtime-safety-")); roots.push(root);
 	const log = path.join(root, "calls.jsonl"); fs.writeFileSync(log, "");
 	const connections: AntigravityAcpConnection[] = [];
 	const runtime = new AntigravityRuntime((options) => {
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
+			args: [fakeAgent, ...(scenario ? [scenario] : [])], env: { ...options.env, FAKE_AGENT_LOG_FILE: log, FAKE_AGENT_MODE_IDS: runtimeOptions?.modeIds?.join(","), FAKE_AGENT_RESTORED_MODE_IDS: runtimeOptions?.restoredModeIds?.join(","), ...(runtimeOptions?.emitModeUpdates ? { FAKE_AGENT_EMIT_MODE_UPDATES: "1" } : {}) } });
 		connections.push(connection); return connection;
 	}, mode, store, runtimeOptions);
 	runtimes.push(runtime);
@@ -107,6 +107,93 @@ describe("permission policy and lifecycle", () => {
 		expect(await discovery).toBeInstanceOf(Error);
 		expect(connections[0]?.process.alive).toBe(false);
 		expect(entries().some((entry) => entry.method === "session/new")).toBe(false);
+	});
+});
+
+describe("early lifecycle and setup cancellation", () => {
+	it.each(["initialize-timeout", "session-timeout"])("starts before slow %s and stays cancellable", async (scenario) => {
+		const { runtime, connections, entries } = setup(scenario);
+		const controller = new AbortController();
+		const writer = runtime.stream(model, { messages: [user("hello")] }, { sessionId: "early-start", signal: controller.signal });
+		const iterator = writer.stream[Symbol.asyncIterator]();
+		expect((await iterator.next()).value).toMatchObject({ type: "start", partial: { content: [] } });
+		await vi.waitFor(() => expect(entries().some((entry) => entry.method === (scenario === "session-timeout" ? "session/new" : "initialize"))).toBe(true));
+		controller.abort();
+		const events = [];
+		for (;;) { const next = await iterator.next(); if (next.done) break; events.push(next.value); }
+		expect(events.map((event) => event.type)).toEqual(["error"]);
+		expect(writer.message.stopReason).toBe("aborted");
+		expect(writer.message.content).toEqual([]);
+		await vi.waitFor(() => expect(connections[0]!.process.alive).toBe(false));
+	});
+
+	it("does not start work for a pre-aborted request", async () => {
+		const { runtime, connections } = setup();
+		const controller = new AbortController(); controller.abort();
+		const writer = runtime.stream(model, { messages: [user("hello")] }, { signal: controller.signal });
+		const events = [];
+		for await (const event of writer.stream) events.push(event.type);
+		expect(events).toEqual(["error"]);
+		expect(connections).toHaveLength(0);
+	});
+});
+
+describe("host permission mode negotiation", () => {
+	const hostModes = ["default", "accept-edits", "auto", "plan"];
+
+	it.each([undefined, "config-options"])("confirms the advertised edit-policy alias (%s)", async (scenario) => {
+		const { runtime, entries } = setup(scenario, "auto_edit", undefined, { modeIds: hostModes });
+		expect((await turn(runtime, [user("hello")])).stopReason).toBe("stop");
+		expect(entries().find((entry) => entry.method === "session/prompt")?.mode).toBe("accept-edits");
+		expect((await runtime.snapshot()).processes[0]).toMatchObject({ confirmedPermissionMode: "auto_edit", confirmedAcpModeId: "accept-edits" });
+	});
+
+	it("does not silently substitute auto or default for yolo", async () => {
+		const { runtime, entries } = setup("config-options", "yolo", undefined, { modeIds: hostModes });
+		const message = await turn(runtime, [user("hello")]);
+		expect(message.errorMessage).toContain("Advertised modes: default, accept-edits, auto, plan");
+		expect(message.errorMessage).toContain("/antigravity-acp permissions default");
+		expect(entries().some((entry) => entry.method === "session/prompt")).toBe(false);
+	});
+
+	it.each([undefined, "config-options"])("changes a warm session to the alias and back to default with update notifications (%s)", async (scenario) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-warm-mode-update-")); roots.push(root);
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const { runtime, connections } = setup(scenario, "default", store, { modeIds: hostModes, emitModeUpdates: true });
+		await turn(runtime, [user("hello")]);
+		const pid = (await runtime.snapshot()).processes[0]?.pid;
+		await runtime.setPermissionMode("auto_edit");
+		expect((await runtime.snapshot()).processes[0]).toMatchObject({ pid, alive: true, confirmedPermissionMode: "auto_edit", confirmedAcpModeId: "accept-edits" });
+		expect(store.get("safety")).toBeDefined();
+		await runtime.setPermissionMode("default");
+		expect((await runtime.snapshot()).processes[0]).toMatchObject({ pid, alive: true, confirmedPermissionMode: "default", confirmedAcpModeId: "default" });
+		expect(connections).toHaveLength(1);
+	});
+
+	it("rejects an ignored alias selection", async () => {
+		const { runtime, entries } = setup("config-options-ignored-mode", "auto_edit", undefined, { modeIds: hostModes });
+		expect((await turn(runtime, [user("hello")])).errorMessage).toContain("did not confirm");
+		expect(entries().some((entry) => entry.method === "session/prompt")).toBe(false);
+	});
+
+	it("rejects unexpected drift away from the confirmed alias", async () => {
+		const { runtime } = setup("config-options-mode-drift", "auto_edit", undefined, { modeIds: hostModes });
+		expect((await turn(runtime, [user("hello")])).errorMessage).toContain("permission mode unexpectedly");
+	});
+
+	it("renegotiates restored aliases and removes unsupported saved bindings", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "acp-alias-restore-")); roots.push(root);
+		const store = new AcpSessionStore(path.join(root, "sessions.json"));
+		const first = setup("config-options", "auto_edit", store, { modeIds: hostModes });
+		const response = await turn(first.runtime, [user("hello")]);
+		await first.runtime.close();
+		const restored = setup("config-options", "auto_edit", store, { modeIds: hostModes });
+		expect((await turn(restored.runtime, [user("hello"), response, user("next", 2)])).stopReason).toBe("stop");
+		expect((await restored.runtime.snapshot()).processes[0]).toMatchObject({ restored: true, confirmedAcpModeId: "accept-edits" });
+		await restored.runtime.close();
+		const unsupported = setup("config-options", "auto_edit", store, { modeIds: hostModes, restoredModeIds: ["default", "auto", "plan"] });
+		expect((await turn(unsupported.runtime, [user("hello"), response, user("next", 2)])).errorMessage).toContain("restored session did not advertise");
+		expect(store.get("safety")).toBeUndefined();
 	});
 });
 
@@ -486,6 +573,32 @@ describe("abort cleanup", () => {
 		} finally { vi.useRealTimers(); await runtime.close(); }
 	});
 
+	it("resumes a bridge call and a permission request raised by the same inference together", async () => {
+		const { runtime } = setup(undefined, "default");
+		const messages = [user("bridge and permission")];
+		const first = await drain(runtime.stream(model, { tools, messages }, { sessionId: "mixed", apiKey: "test-key" }));
+		expect(first.stopReason).toBe("toolUse");
+		const calls = first.content.filter((block) => block.type === "toolCall");
+		const echo = calls.find((block) => block.name === "echo");
+		const permission = calls.find((block) => block.name === PERMISSION_TOOL_NAME);
+		if (echo?.type !== "toolCall" || permission?.type !== "toolCall") throw new Error(`expected echo and permission calls, got ${JSON.stringify(calls)}`);
+
+		// Pi answers both calls at once, faster than the provider's tool batching window.
+		const second = await Promise.race([
+			drain(runtime.stream(model, { tools, messages: [...messages, first,
+				{ role: "toolResult", toolCallId: echo.id, toolName: echo.name, content: [{ type: "text", text: "echoed" }], isError: false, timestamp: 2 },
+				{ role: "toolResult", toolCallId: permission.id, toolName: PERMISSION_TOOL_NAME, content: [{ type: "text", text: "Allowed" }], isError: false, timestamp: 3,
+					details: { kind: PERMISSION_RESULT_KIND, requestId: permission.id, optionId: "allow-once", cancelled: false } },
+			] }, { sessionId: "mixed", apiKey: "test-key" })),
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("continuation hung")), 3000)),
+		]);
+		expect(second.stopReason).toBe("stop");
+		expect(second.content).toEqual([{ type: "text", text: "echoed|allow-once" }]);
+		// The batching timer of the first slice must not end a later slice.
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect((await runtime.snapshot()).processes[0]?.waitingForTools).toBe(0);
+	});
+
 	it("releases partially parked calls and rejects new calls after abort", async () => {
 		const { runtime } = setup();
 		const internals = runtime as unknown as { requestPiTool(binding: unknown, invocation: unknown): Promise<{ isError?: boolean }> };
@@ -828,7 +941,7 @@ describe("live quota", () => {
 		expect(fetchQuota).toHaveBeenCalledTimes(1);
 	});
 
-	it("starts a fresh quota read after logout while the old one is still in flight", async () => {
+	it.each(["logout", "credential change"])("starts a fresh quota read on %s while the old one is still in flight", async (change) => {
 		const { root, runtime } = setup();
 		vi.stubEnv("GEMINI_HOME", path.join(root, "gemini"));
 		try {
@@ -841,17 +954,18 @@ describe("live quota", () => {
 				.mockReturnValueOnce(newPromise);
 
 			const old = runtime.quota(undefined);
-			await runtime.logout();
-			const fresh = runtime.quota(undefined);
+			if (change === "logout") await runtime.logout();
+			const nextKey = change === "credential change" ? "new-key" : undefined;
+			const fresh = runtime.quota(nextKey);
 			resolveOld({ at: 1, groups: [] });
 			await old;
-			const third = runtime.quota(undefined);
+			const third = runtime.quota(nextKey);
 			resolveNew({ at: 2, groups: [{ displayName: "fresh", buckets: [] }] });
 
 			expect((await fresh).at).toBe(2);
 			expect((await third).at).toBe(2);
 			expect(fetchQuota).toHaveBeenCalledTimes(2);
-			expect((runtime as unknown as { quotaCache?: AntigravityQuotaSnapshot }).quotaCache?.at).toBe(2);
+			expect((runtime as unknown as { quotaCache?: { snapshot: AntigravityQuotaSnapshot } }).quotaCache?.snapshot.at).toBe(2);
 		} finally {
 			vi.unstubAllEnvs();
 		}
@@ -861,12 +975,12 @@ describe("live quota", () => {
 describe("throwaway conversations", () => {
 	const userSid = "0f8fad5b-d9cb-469f-a165-70867728950e";
 	function conversationsIn(root: string, sids: "uuid" | "plain" = "uuid") {
-		const acp = path.join(root, "gemini", "antigravity-acp");
+		vi.stubEnv("PI_CODING_AGENT_DIR", root);
+		const acp = path.join(root, "antigravity-acp-provider", "gemini", "antigravity-acp");
 		const conversations = path.join(acp, "conversations");
 		fs.mkdirSync(conversations, { recursive: true });
 		for (const suffix of [".db", ".db-shm", ".db-wal", ".meta"]) fs.writeFileSync(path.join(conversations, userSid + suffix), "user");
 		fs.writeFileSync(path.join(acp, "acp_token.json"), "{}");
-		vi.stubEnv("GEMINI_HOME", path.join(root, "gemini"));
 		vi.stubEnv("FAKE_AGENT_CONVERSATIONS", sids);
 		return {
 			files: () => fs.readdirSync(conversations).sort(),

@@ -10,11 +10,11 @@ const legacy = scenario.startsWith("legacy");
 const thoughtId = scenario === "category-only" ? "custom-thinking" :
 	scenario === "thought-alias" ? "thought_level" : "thinking_level";
 const values = (ids) => ids.map((value) => ({ value, name: value }));
+const modelIds = ["gemini-a", "gemini-b", ...(scenario === "native-id" ? ["gemini-a-low"] : []),
+	...(scenario === "new-gemini-4" ? ["gemini-4-test"] : [])];
 const configOptions = () => [
 	{ id: "model", name: "Model", category: "model", type: "select", currentValue: model,
-		options: [{ group: "google", name: "Google", options: values([
-			"gemini-a", "gemini-b", ...(scenario === "native-id" ? ["gemini-a-low"] : []),
-		]) }] },
+		options: [{ group: "google", name: "Google", options: values(modelIds) }] },
 	...(!legacy && !(scenario === "disappearing" && model === "gemini-b") ? [{
 		id: thoughtId, name: "Thinking", type: "select", currentValue: effort,
 		...(["thinking-alias", "thought-alias"].includes(scenario) ? {} : { category: "thought_level" }),
@@ -29,8 +29,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
 	const { id, method, params } = JSON.parse(line);
 	if (id === undefined) continue;
 	if (method === "initialize") {
-		reply(id, { protocolVersion: 1, agentInfo: { name: "model-selection-agent" }, authMethods: [],
+		reply(id, { protocolVersion: 1, agentInfo: { name: "model-selection-agent" },
+			authMethods: [{ id: "api", name: "Gemini API key" }],
 			agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } });
+	} else if (method === "authenticate") {
+		reply(id, {});
 	} else if (method === "session/new") {
 		reply(id, { sessionId: "selection-session", configOptions: configOptions() });
 	} else if (method === "session/resume" || method === "session/load") {
@@ -40,7 +43,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
 			send({ jsonrpc: "2.0", id, error: { code: scenario === "selector-auth" ? -32000 : -32602, message: "Selector update rejected" } });
 			continue;
 		}
-		if (params.configId === "model" && ["gemini-a", "gemini-b", ...(scenario === "native-id" ? ["gemini-a-low"] : [])].includes(params.value)) {
+		if (params.configId === "model" && modelIds.includes(params.value)) {
 			if (scenario !== "ignored-base") model = params.value;
 		} else if (params.configId === thoughtId) {
 			if (!(scenario === "reject-low" && params.value === "low")) effort = params.value;
