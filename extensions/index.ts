@@ -52,6 +52,24 @@ const CLAIMED_QUOTA_REQUESTS = Symbol.for("pi-antigravity-acp:quota-requests");
 const claimSlots = globalThis as unknown as Record<symbol, WeakSet<object> | undefined>;
 const claimedQuotaRequests = (claimSlots[CLAIMED_QUOTA_REQUESTS] ??= new WeakSet());
 
+/** Registered as `/antigravity-acp:<name>` aliases in addition to the
+ * aggregate command, so each subcommand is directly discoverable. */
+const COLON_COMMANDS = [
+	{ name: "setup", description: "Install the ACP runtime and run the sign-in wizard" },
+	{ name: "update", description: "Install the latest signed ACP runtime" },
+	{ name: "update-runtime", description: "Install the latest signed ACP runtime (alias of update)" },
+	{ name: "updates", description: "Show or change the runtime update policy" },
+	{ name: "logout", description: "Clear local credentials and saved sessions for an account" },
+	{ name: "account", description: "Clear an account's local login (alias of logout)" },
+	{ name: "switch-account", description: "Clear the current login before choosing another account" },
+	{ name: "quota", description: "Show per-account quota and this process's token usage" },
+	{ name: "qualify", description: "Run the auth and model-availability qualification wizard" },
+	{ name: "permissions", description: "Set the Antigravity permission mode (default, auto-edit, yolo)" },
+	{ name: "tool-activity", description: "Show, hide or expand Antigravity tool progress" },
+	{ name: "doctor", description: "Show runtime, auth and binding diagnostics (--verbose for stderr)" },
+	{ name: "status", description: "Show provider status and diagnostics" },
+] as const;
+
 export default function antigravityAcpExtension(pi: ExtensionAPI): void {
 	registerAntigravityAcp(pi);
 }
@@ -295,6 +313,15 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 		},
 	};
 	pi.registerCommand("antigravity-acp", commandDefinition);
+	// Each subcommand also gets its own slash command, so `/antigravity-acp:quota`
+	// is a direct invocation instead of `/antigravity-acp quota`. The original
+	// command and its subcommand arguments keep working.
+	for (const { name, description } of COLON_COMMANDS) {
+		pi.registerCommand(`antigravity-acp:${name}`, {
+			description,
+			handler: (args, ctx) => commandDefinition.handler(args.trim() ? `${name} ${args.trim()}` : name, ctx),
+		});
+	}
 	pi.registerCommand("gemini-acp", {
 		...commandDefinition,
 		description: "Deprecated alias for /antigravity-acp",
