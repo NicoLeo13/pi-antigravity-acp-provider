@@ -17,11 +17,13 @@ import {
 	isPermissionMode,
 	isRuntimeUpdateMode,
 	isToolActivityMode,
+	isToolBridgeMode,
 	loadConfig,
 	permissionModeLabel,
 	savePermissionMode,
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
+	saveToolBridgeMode,
 	type PermissionMode,
 } from "../src/config.js";
 import {
@@ -231,10 +233,30 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				ctx.ui.notify(`Antigravity tool activity: ${requested}`, "info");
 				return;
 			}
+			if (command === "tool-bridge" || command.startsWith("tool-bridge ")) {
+				let requested = command.slice("tool-bridge".length).trim().toLowerCase();
+				if (!requested) {
+					const choices = [
+						"ecosystem — bridge only ecosystem tools and let Antigravity use its native core tools (default)",
+						"all — bridge all active Pi tools via MCP",
+					];
+					const selected = await ctx.ui.select("Antigravity Pi MCP tool bridge", choices);
+					if (!selected) return;
+					requested = selected.split(" ", 1)[0]!;
+				}
+				if (!isToolBridgeMode(requested)) {
+					ctx.ui.notify("Usage: /antigravity-acp tool-bridge [all|ecosystem]", "warning");
+					return;
+				}
+				runtime.setToolBridgeMode(requested);
+				saveToolBridgeMode(requested);
+				ctx.ui.notify(`Antigravity Pi MCP tool bridge: ${requested}`, "info");
+				return;
+			}
 			const verbose = command === "doctor --verbose";
 			if (command !== "doctor" && command !== "status" && !verbose) {
 				ctx.ui.notify(
-					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity]",
+					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge]",
 					"warning",
 				);
 				return;
@@ -258,6 +280,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					`Credential storage (preflight): ${describeCredentialStorage({ env: providerAcpEnvironment() })}`,
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
 					`Tool activity mode: ${snapshot.toolActivityMode}`,
+					`Tool bridge mode: ${snapshot.toolBridgeMode}`,
 					`Active bindings: ${snapshot.bindings}`,
 					formatMetrics(snapshot.metrics),
 					...snapshot.processes.flatMap((item) => [

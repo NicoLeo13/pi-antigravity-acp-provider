@@ -95,9 +95,14 @@ Type `/antigravity-acp ` in Pi for subcommand and option tab-completion:
 /antigravity-acp logout | account
 /antigravity-acp permissions [default|auto-edit|yolo]
 /antigravity-acp tool-activity [off|compact|full]
+/antigravity-acp tool-bridge [all|ecosystem]
 ```
 
 Settings live in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (default `PI_CODING_AGENT_DIR`: `~/.pi/agent`):
+
+`toolBridge` also lives in that config file and defaults to `ecosystem` on this fork branch, omitting the core Pi tools `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls` and leaving those operations to Antigravity's native tools. Setting it to `all` is an explicit opt-in that projects every active Pi tool through the `pi-bridge` MCP server. Those names can have custom Pi implementations and hooks; native Antigravity tools are not interchangeable with those implementations or their security/audit hooks. `doctor`/`status` still lists every omitted tool with its reason.
+
+On first use of a custom profile without a config, existing permission/update settings are copied from the default agent directory (or the legacy Gemini-provider config). Existing custom configs are never overwritten, and saved sessions are not copied. **Custom Pi profiles do not isolate Antigravity accounts or managed runtimes:** Antigravity's OAuth credentials and runtime installation remain in their shared locations.
 
 - `permissions`: `yolo` (default), `auto_edit`, or `default`
 - `runtimeUpdates`: `automatic` (default), `notify`, or `manual` — see [`docs/RUNTIME-UPDATES.md`](docs/RUNTIME-UPDATES.md)
