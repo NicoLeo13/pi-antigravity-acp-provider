@@ -99,8 +99,6 @@ On macOS the Antigravity server keeps the consumer token in the login keychain (
 /antigravity-acp tool-bridge [all|ecosystem]
 ```
 
-Every subcommand is also available directly as `/antigravity-acp:<name>`, for example `/antigravity-acp:quota` or `/antigravity-acp:doctor --verbose`. Arguments go to the same handler, so `/antigravity-acp <name> ...` keeps working.
-
 Permission, runtime-update, and tool-activity modes are saved in `$PI_CODING_AGENT_DIR/antigravity-acp-provider/config.json` (where `PI_CODING_AGENT_DIR` defaults to `~/.pi/agent`). Runtime updates default to `automatic` (only provider-managed installations are replaced), and `toolActivity` defaults to `compact` (one line per Antigravity `tool_call` start; `off` hides them, `full` includes all updates and details). ACP session bindings are saved beside the config in `sessions.json`.
 
 `toolBridge` also lives in that config file and defaults to `all`, projecting every active Pi tool through the `pi-bridge` MCP server so shipped behavior does not change. Setting it to `ecosystem` is an explicit opt-in that omits the core Pi tools `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`, leaving those operations to Antigravity's native tools. Those names can have custom Pi implementations and hooks; native Antigravity tools are not interchangeable with those implementations or their security/audit hooks. `doctor`/`status` still lists every omitted tool with its reason.
