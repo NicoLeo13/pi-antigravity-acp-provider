@@ -202,8 +202,8 @@ export class AntigravityRuntime {
 		this.ensureAgent = connectionFactory === undefined;
 		this.permissionMode = permissionMode;
 		this.toolActivityMode = options?.toolActivityMode ?? "compact";
-		this.toolBridgeMode = options?.toolBridgeMode ?? "all";
-		this.isolatedGeminiHome = options?.isolatedGeminiHome ?? false;
+		this.toolBridgeMode = options?.toolBridgeMode ?? "ecosystem";
+		this.isolatedGeminiHome = options?.isolatedGeminiHome ?? true;
 		this.sessionStore = sessionStore ?? (this.ensureAgent ? new AcpSessionStore() : undefined);
 		this.maxBindings = positiveInt(options?.maxBindings ?? process.env.PI_ANTIGRAVITY_MAX_BINDINGS, DEFAULT_MAX_BINDINGS, 1);
 		this.idleMs = positiveInt(options?.idleMs ?? process.env.PI_ANTIGRAVITY_BINDING_IDLE_MS, DEFAULT_BINDING_IDLE_MS, 1);

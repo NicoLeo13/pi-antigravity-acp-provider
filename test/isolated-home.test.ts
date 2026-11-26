@@ -174,14 +174,14 @@ describe("isolated GEMINI_HOME", () => {
 		});
 	});
 
-	it("defaults AntigravityRuntime isolatedGeminiHome to false and updates via setter", async () => {
+	it("defaults AntigravityRuntime isolatedGeminiHome to true and updates via setter", async () => {
 		const runtime = new AntigravityRuntime(() => {
 			throw new Error("unused");
 		});
 		try {
-			expect((await runtime.snapshot()).isolatedGeminiHome).toBe(false);
-			runtime.setIsolatedGeminiHome(true);
 			expect((await runtime.snapshot()).isolatedGeminiHome).toBe(true);
+			runtime.setIsolatedGeminiHome(false);
+			expect((await runtime.snapshot()).isolatedGeminiHome).toBe(false);
 		} finally {
 			await runtime.close();
 		}

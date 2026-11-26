@@ -228,8 +228,8 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				let requested = command.slice("tool-bridge".length).trim().toLowerCase();
 				if (!requested) {
 					const choices = [
-						"all — bridge all active Pi tools via MCP (default)",
-						"ecosystem — bridge only ecosystem tools (engram, codegraph, subagents) and let Antigravity use its native core tools",
+						"ecosystem — bridge only ecosystem tools (engram, codegraph, subagents) and let Antigravity use its native core tools (default)",
+						"all — bridge all active Pi tools via MCP",
 					];
 					const selected = await ctx.ui.select("Antigravity Pi MCP tool bridge", choices);
 					if (!selected) return;

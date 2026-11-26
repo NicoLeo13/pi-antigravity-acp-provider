@@ -41,8 +41,8 @@ describe("permission configuration", () => {
 			permissions: "yolo",
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 		saveRuntimeUpdateMode("notify", file);
 		savePermissionMode("auto_edit", file);
@@ -51,8 +51,8 @@ describe("permission configuration", () => {
 			permissions: "auto_edit",
 			runtimeUpdates: "notify",
 			toolActivity: "off",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 	});
 
@@ -75,7 +75,7 @@ describe("permission configuration", () => {
 		expect(loadConfig(file).toolActivity).toBe("compact");
 	});
 
-	it("defaults toolBridge to all and only persists ecosystem explicitly", () => {
+	it("defaults toolBridge to ecosystem and only persists all explicitly", () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-tool-bridge-"));
 		directories.push(directory);
 		const file = path.join(directory, "config.json");
@@ -84,37 +84,37 @@ describe("permission configuration", () => {
 		expect(isToolBridgeMode("ecosystem")).toBe(true);
 		expect(isToolBridgeMode("core")).toBe(false);
 
-		expect(loadConfig(file).toolBridge).toBe("all");
+		expect(loadConfig(file).toolBridge).toBe("ecosystem");
 
 		fs.writeFileSync(
 			file,
-			JSON.stringify({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "ecosystem" }),
+			JSON.stringify({ permissions: "yolo", runtimeUpdates: "automatic", toolActivity: "compact", toolBridge: "all" }),
 		);
-		expect(loadConfig(file).toolBridge).toBe("ecosystem");
+		expect(loadConfig(file).toolBridge).toBe("all");
 
 		fs.writeFileSync(file, JSON.stringify({ toolBridge: "bogus" }));
-		expect(loadConfig(file).toolBridge).toBe("all");
-
-		saveToolBridgeMode("ecosystem", file);
 		expect(loadConfig(file).toolBridge).toBe("ecosystem");
+
 		saveToolBridgeMode("all", file);
 		expect(loadConfig(file).toolBridge).toBe("all");
+		saveToolBridgeMode("ecosystem", file);
+		expect(loadConfig(file).toolBridge).toBe("ecosystem");
 	});
 
-	it("defaults isolatedGeminiHome to off and persists an explicit opt-in", () => {
+	it("defaults isolatedGeminiHome to on and persists an explicit opt-out", () => {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-isolated-home-"));
 		directories.push(directory);
 		const file = path.join(directory, "config.json");
 
-		expect(loadConfig(file).isolatedGeminiHome).toBe(false);
+		expect(loadConfig(file).isolatedGeminiHome).toBe(true);
 
 		fs.writeFileSync(file, JSON.stringify({ isolatedGeminiHome: "yes" }));
-		expect(loadConfig(file).isolatedGeminiHome).toBe(false);
-
-		saveIsolatedGeminiHome(true, file);
 		expect(loadConfig(file).isolatedGeminiHome).toBe(true);
+
 		saveIsolatedGeminiHome(false, file);
 		expect(loadConfig(file).isolatedGeminiHome).toBe(false);
+		saveIsolatedGeminiHome(true, file);
+		expect(loadConfig(file).isolatedGeminiHome).toBe(true);
 	});
 
 	it("resolves default agent directory and config paths when PI_CODING_AGENT_DIR is unset", () => {
@@ -144,16 +144,16 @@ describe("permission configuration", () => {
 			permissions: "yolo",
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 		savePermissionMode("default");
 		expect(loadConfig()).toEqual({
 			permissions: "default",
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 
 		const configFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
@@ -195,8 +195,8 @@ describe("permission configuration", () => {
 			permissions: "auto_edit",
 			runtimeUpdates: "manual",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 		const targetFile = path.join(fakeHome, ".pi", "agent", "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -222,8 +222,8 @@ describe("permission configuration", () => {
 			permissions: "auto_edit",
 			runtimeUpdates: "notify",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 		const targetFile = path.join(customAgentDir, "antigravity-acp-provider", "config.json");
 		expect(fs.existsSync(targetFile)).toBe(true);
@@ -250,8 +250,8 @@ describe("permission configuration", () => {
 			permissions: "default",
 			runtimeUpdates: "manual",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 		expect(fs.readFileSync(target, "utf8")).toBe(existing);
 		fs.unlinkSync(target);
@@ -259,8 +259,8 @@ describe("permission configuration", () => {
 			permissions: "yolo",
 			runtimeUpdates: "automatic",
 			toolActivity: "compact",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);

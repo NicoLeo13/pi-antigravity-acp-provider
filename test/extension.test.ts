@@ -204,8 +204,8 @@ describe("extension entry point", () => {
 			permissions: "auto_edit",
 			runtimeUpdates: "notify",
 			toolActivity: "off",
-			toolBridge: "all",
-			isolatedGeminiHome: false,
+			toolBridge: "ecosystem",
+			isolatedGeminiHome: true,
 		});
 	});
 
@@ -214,22 +214,22 @@ describe("extension entry point", () => {
 		const { loadConfig } = await import("../src/config.js");
 		const command = pi.commands.get("antigravity-acp")!;
 
-		expect(loadConfig().toolBridge).toBe("all");
-
-		await command.handler("tool-bridge ecosystem", ctx as never);
 		expect(loadConfig().toolBridge).toBe("ecosystem");
-		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity Pi MCP tool bridge: ecosystem", "info"]);
+
+		await command.handler("tool-bridge all", ctx as never);
+		expect(loadConfig().toolBridge).toBe("all");
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity Pi MCP tool bridge: all", "info"]);
 
 		await command.handler("doctor", ctx as never);
-		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Tool bridge mode: ecosystem");
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Tool bridge mode: all");
 
 		const selectCtx = createFakeContext({
 			sessionId: "parent",
 			cwd: root,
-			selectAnswer: (labels) => labels.find((label) => label.startsWith("all ")),
+			selectAnswer: (labels) => labels.find((label) => label.startsWith("ecosystem ")),
 		});
 		await command.handler("tool-bridge", selectCtx as never);
-		expect(loadConfig().toolBridge).toBe("all");
+		expect(loadConfig().toolBridge).toBe("ecosystem");
 
 		await command.handler("tool-bridge invalid", ctx as never);
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
@@ -243,25 +243,25 @@ describe("extension entry point", () => {
 		const { loadConfig } = await import("../src/config.js");
 		const command = pi.commands.get("antigravity-acp")!;
 
-		expect(loadConfig().isolatedGeminiHome).toBe(false);
-
-		await command.handler("isolated-home on", ctx as never);
 		expect(loadConfig().isolatedGeminiHome).toBe(true);
+
+		await command.handler("isolated-home off", ctx as never);
+		expect(loadConfig().isolatedGeminiHome).toBe(false);
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([
-			"Antigravity isolated GEMINI_HOME: on (applies to new connections)",
+			"Antigravity isolated GEMINI_HOME: off (applies to new connections)",
 			"info",
 		]);
 
 		await command.handler("doctor", ctx as never);
-		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Isolated GEMINI_HOME: on");
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Isolated GEMINI_HOME: off");
 
 		const selectCtx = createFakeContext({
 			sessionId: "parent",
 			cwd: root,
-			selectAnswer: (labels) => labels.find((label) => label.startsWith("off ")),
+			selectAnswer: (labels) => labels.find((label) => label.startsWith("on ")),
 		});
 		await command.handler("isolated-home", selectCtx as never);
-		expect(loadConfig().isolatedGeminiHome).toBe(false);
+		expect(loadConfig().isolatedGeminiHome).toBe(true);
 
 		await command.handler("isolated-home invalid", ctx as never);
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual([

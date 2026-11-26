@@ -60,8 +60,8 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
 			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
 			toolActivity: isToolActivityMode(parsed.toolActivity) ? parsed.toolActivity : "compact",
-			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "all",
-			isolatedGeminiHome: typeof parsed.isolatedGeminiHome === "boolean" ? parsed.isolatedGeminiHome : false,
+			toolBridge: isToolBridgeMode(parsed.toolBridge) ? parsed.toolBridge : "ecosystem",
+			isolatedGeminiHome: typeof parsed.isolatedGeminiHome === "boolean" ? parsed.isolatedGeminiHome : true,
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
@@ -70,8 +70,8 @@ export function loadConfig(file = resolveConfigPath()): AntigravityAcpConfig {
 		permissions: "yolo",
 		runtimeUpdates: "automatic",
 		toolActivity: "compact",
-		toolBridge: "all",
-		isolatedGeminiHome: false,
+		toolBridge: "ecosystem",
+		isolatedGeminiHome: true,
 	};
 }
 
