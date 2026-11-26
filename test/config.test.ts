@@ -30,20 +30,7 @@ afterEach(() => {
 	}
 	for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 
-	it("requires an explicit native workflow opt-in and preserves it when saving other settings", () => {
-		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-workflows-"));
-		directories.push(directory);
-		const file = path.join(directory, "config.json");
-		for (const value of [undefined, false, "true", 1, null]) {
-			fs.writeFileSync(file, JSON.stringify({ nativeWorkflows: value }));
-			expect(loadConfig(file).nativeWorkflows).toBe(false);
-		}
-		fs.writeFileSync(file, JSON.stringify({ nativeWorkflows: true }));
-		savePermissionMode("default", file);
-		saveRuntimeUpdateMode("manual", file);
-		saveToolActivityMode("off", file);
-		expect(loadConfig(file).nativeWorkflows).toBe(true);
-	});
+
 });
 
 describe("permission configuration", () => {
@@ -262,5 +249,20 @@ describe("permission configuration", () => {
 		});
 		expect(fs.existsSync(path.join(path.dirname(target), "sessions.json"))).toBe(false);
 		expect(fs.existsSync(path.join(source, "sessions.json"))).toBe(true);
+	});
+
+	it("requires an explicit native workflow opt-in and preserves it when saving other settings", () => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-acp-workflows-"));
+		directories.push(directory);
+		const file = path.join(directory, "config.json");
+		for (const value of [undefined, false, "true", 1, null]) {
+			fs.writeFileSync(file, JSON.stringify({ nativeWorkflows: value }));
+			expect(loadConfig(file).nativeWorkflows).toBe(false);
+		}
+		fs.writeFileSync(file, JSON.stringify({ nativeWorkflows: true }));
+		savePermissionMode("default", file);
+		saveRuntimeUpdateMode("manual", file);
+		saveToolActivityMode("off", file);
+		expect(loadConfig(file).nativeWorkflows).toBe(true);
 	});
 });

@@ -58,12 +58,13 @@ async function load(sessionId: string, events?: FakeExtensionApi["api"]["events"
 	if (events) pi.api.events = events;
 	registerAntigravityAcp(pi.api, (options) => {
 		const connection = new AntigravityAcpConnection({ ...options, command: process.execPath,
-			args: [fakeAgent], env: { ...process.env, FAKE_AGENT_LOG_FILE: log } });
+			args: [fakeAgent], env: { ...options.env, FAKE_AGENT_LOG_FILE: log } });
 		connections.push(connection);
 		return connection;
 	});
 	const ctx = createFakeContext({ sessionId, cwd: root });
 	loaded.push({ pi, ctx });
+	await pi.emit("session_start", {}, ctx);
 	return { pi, ctx };
 }
 
@@ -85,6 +86,31 @@ describe("extension entry point", () => {
 		expect(registry.get("antigravity-acp")).toBe(pi.providers[0]);
 		expect(pi.tools.has(PERMISSION_TOOL_NAME)).toBe(true);
 		expect([...pi.commands.keys()]).toEqual(["antigravity-acp", "gemini-acp"]);
+	});
+
+	it("completes arguments on the existing commands without opening an ACP connection", async () => {
+		const { pi, ctx } = await load("parent");
+		for (const name of ["antigravity-acp", "gemini-acp"]) {
+			const complete = pi.commands.get(name)!.getArgumentCompletions!;
+			expect(await complete("tool-activity f")).toEqual([{ value: "tool-activity full", label: "full" }]);
+			expect(await complete("doctor --v")).toEqual([{ value: "doctor --verbose", label: "--verbose" }]);
+		}
+		expect([...pi.commands.keys()]).toEqual(["antigravity-acp", "gemini-acp"]);
+		expect(connections).toHaveLength(0);
+		const items = (await pi.commands.get("antigravity-acp")!.getArgumentCompletions!("tool-activity o"))!;
+		await pi.commands.get("antigravity-acp")!.handler(items[0]!.value, ctx as never);
+		expect(ctx.ui.notify).toHaveBeenCalledWith("Antigravity tool activity: off", "info");
+	});
+
+	it("does not open an ACP quota session after Pi logout", async () => {
+		const { pi, ctx } = await load("parent");
+		ctx.modelRegistry.getApiKeyForProvider.mockResolvedValue(undefined);
+		await pi.commands.get("antigravity-acp")!.handler("quota", ctx as never);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Sign in with /login antigravity-acp"), "info");
+		const reply = vi.fn();
+		pi.api.events.emit(QUOTA_REQUEST_CHANNEL, { reply });
+		await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining("Sign in") }));
+		expect(connections).toHaveLength(0);
 	});
 
 	it("keeps the parent session usable after a child instance shuts down", async () => {
@@ -200,13 +226,7 @@ describe("extension entry point", () => {
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity runtime updates: notify", "info"]);
 		await command.handler("permissions auto-edit", ctx as never);
 		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["Antigravity permission mode: auto-edit.", "info"]);
-		expect(loadConfig()).toEqual({
-			permissions: "auto_edit",
-			runtimeUpdates: "notify",
-			toolActivity: "off",
-			toolBridge: "all",
-			nativeWorkflows: false,
-		});
+		expect(loadConfig()).toEqual({ permissions: "auto_edit", runtimeUpdates: "notify", toolActivity: "off", nativeWorkflows: false, toolBridge: "all" });
 	});
 
 	it("configures tool-bridge via command arguments, interactive selector, and doctor output", async () => {
