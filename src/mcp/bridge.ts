@@ -12,23 +12,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Value } from "typebox/value";
 
 import { AntigravityAcpError } from "../acp/errors.js";
-import type { ToolBridgeMode } from "../config.js";
 import { PACKAGE_VERSION, PERMISSION_TOOL_NAME } from "../constants.js";
 import { projectToolSchema } from "./schema.js";
 
 const BODY_LIMIT = 1024 * 1024;
 const DEFAULT_PROGRESS_KEEPALIVE_MS = 15_000;
-
-/** Core Pi coding tools that Antigravity ACP already provides natively. */
-export const CORE_PI_TOOLS: ReadonlySet<string> = new Set([
-	"read",
-	"write",
-	"edit",
-	"bash",
-	"grep",
-	"find",
-	"ls",
-]);
 
 interface BridgeTool {
 	mcpName: string;
@@ -48,7 +36,6 @@ export interface PiMcpBridgeOptions {
 	tools: readonly Tool[];
 	onCall: (invocation: PiToolInvocation) => Promise<CallToolResult>;
 	progressKeepaliveMs?: number;
-	toolBridgeMode?: ToolBridgeMode;
 }
 
 export interface ToolOmission {
@@ -56,9 +43,9 @@ export interface ToolOmission {
 	reason: string;
 }
 
-export function piToolFingerprint(tools: readonly Tool[], mode: ToolBridgeMode = "all"): string {
+export function piToolFingerprint(tools: readonly Tool[]): string {
 	const omissions: ToolOmission[] = [];
-	const projected = projectTools(tools, omissions, mode);
+	const projected = projectTools(tools, omissions);
 	return projectionFingerprint(projected, omissions);
 }
 
@@ -66,9 +53,9 @@ function projectionFingerprint(tools: BridgeTool[], omissions: ToolOmission[]): 
 	return JSON.stringify([tools.map((tool) => [tool.mcpName, tool.description, tool.inputSchema]), omissions]);
 }
 
-export function planToolProjection(tools: readonly Tool[], mode: ToolBridgeMode = "all"): ToolOmission[] {
+export function planToolProjection(tools: readonly Tool[]): ToolOmission[] {
 	const omissions: ToolOmission[] = [];
-	projectTools(tools, omissions, mode);
+	projectTools(tools, omissions);
 	return omissions;
 }
 
@@ -81,7 +68,7 @@ export class PiMcpBridge {
 	private url: string | undefined;
 
 	constructor(private readonly options: PiMcpBridgeOptions) {
-		this.tools = projectTools(options.tools, this.omissions, options.toolBridgeMode ?? "all");
+		this.tools = projectTools(options.tools, this.omissions);
 		this.fingerprint = projectionFingerprint(this.tools, this.omissions);
 	}
 
@@ -215,15 +202,11 @@ export class PiMcpBridge {
 	}
 }
 
-function projectTools(tools: readonly Tool[], omissions: ToolOmission[], mode: ToolBridgeMode = "all"): BridgeTool[] {
+function projectTools(tools: readonly Tool[], omissions: ToolOmission[]): BridgeTool[] {
 	const output: BridgeTool[] = [];
 	const names = new Set<string>();
 	for (const tool of tools) {
 		if (tool.name === PERMISSION_TOOL_NAME) continue;
-		if (mode === "ecosystem" && CORE_PI_TOOLS.has(tool.name)) {
-			omissions.push({ name: tool.name, reason: "native Antigravity tool preferred (toolBridge=ecosystem)" });
-			continue;
-		}
 		const mcpName = `pi_${tool.name}`.replace(/[^a-zA-Z0-9_-]/gu, "_").slice(0, 64);
 		if (!mcpName || names.has(mcpName)) {
 			omissions.push({ name: tool.name, reason: "duplicate or invalid projected name" });

@@ -1,11 +1,11 @@
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
+	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { inspectAntigravityAuth } from "../src/acp/antigravity.js";
-import { describeCredentialStorage } from "../src/acp/credential-storage.js";
+import { describeCredentialStorage, providerAcpEnvironment } from "../src/acp/credential-storage.js";
 import { errorMessage } from "../src/acp/errors.js";
 import { resolveAntigravityAcpEntry } from "../src/acp/process.js";
 import {
@@ -17,14 +17,11 @@ import {
 	isPermissionMode,
 	isRuntimeUpdateMode,
 	isToolActivityMode,
-	isToolBridgeMode,
 	loadConfig,
 	permissionModeLabel,
 	savePermissionMode,
 	saveRuntimeUpdateMode,
 	saveToolActivityMode,
-	saveToolBridgeMode,
-	saveIsolatedGeminiHome,
 	type PermissionMode,
 } from "../src/config.js";
 import {
@@ -34,6 +31,7 @@ import {
 	QUOTA_REQUEST_CHANNEL,
 } from "../src/constants.js";
 import type { AntigravityQuotaSnapshot } from "../src/acp/usage-quota.js";
+import { PROVIDER_ID } from "../src/models.js";
 import {
 	PERMISSION_RESULT_KIND,
 	PERMISSION_TOOL_NAME,
@@ -42,6 +40,7 @@ import {
 } from "../src/runtime.js";
 import { acquireSharedRuntime, releaseSharedRuntime } from "../src/shared-runtime.js";
 import { runSetupWizard } from "../src/wizard.js";
+import { completeAntigravityArguments } from "./command-completions.js";
 
 export type { AntigravityQuotaSnapshot } from "../src/acp/usage-quota.js";
 
@@ -60,12 +59,19 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	const { runtime, provider } = shared;
 	pi.registerProvider(provider);
 
+	let modelRegistry: ExtensionContext["modelRegistry"] | undefined;
+	async function readQuota(registry: typeof modelRegistry) {
+		const key = await registry?.getApiKeyForProvider(PROVIDER_ID);
+		if (!key) throw new Error("Sign in with /login antigravity-acp before checking quota.");
+		return runtime.quota(key);
+	}
+
 	// Other extensions ask for quota with `{ reply }` and get exactly one `{ ok, quota | error }`.
 	const unsubscribeQuota = pi.events.on(QUOTA_REQUEST_CHANNEL, (data) => {
 		const reply = (data as { reply?: unknown } | undefined)?.reply;
 		if (typeof reply !== "function" || claimedQuotaRequests.has(data as object)) return;
 		claimedQuotaRequests.add(data as object);
-		void runtime.quota(undefined).then(
+		void readQuota(modelRegistry).then(
 			(quota) => ({ ok: true as const, quota }),
 			(error: unknown) => ({ ok: false as const, error: errorMessage(error) }),
 		).then((result) => {
@@ -117,10 +123,11 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 
 	const commandDefinition = {
 		description: "Set up, inspect, update, or configure Google Antigravity ACP",
+		getArgumentCompletions: completeAntigravityArguments,
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const command = args.trim() || "doctor";
 			if (command === "setup") {
-				await runSetupWizard(ctx.ui, runtime);
+				await runSetupWizard(ctx, runtime);
 				return;
 			}
 			if (command === "update" || command === "update-runtime") {
@@ -153,13 +160,13 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 			if (command === "logout" || command === "account" || command === "switch-account") {
 				await runtime.logout();
 				ctx.ui.notify(
-					"Local Antigravity credentials and saved ACP sessions were cleared. Run /logout for the old Pi marker, then /login to choose the next account.",
+					"Cleared this Pi profile's Google login and saved ACP sessions. Use /logout to remove the Pi sign-in record, or /login antigravity-acp to choose another account.",
 					"info",
 				);
 				return;
 			}
 			if (command === "quota") {
-				const quota = await runtime.quota(undefined).then(
+				const quota = await readQuota(ctx.modelRegistry).then(
 					formatQuota,
 					(error: unknown) => `Antigravity quota: unavailable (${errorMessage(error)})`,
 				);
@@ -167,7 +174,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				return;
 			}
 			if (command === "qualify") {
-				await runSetupWizard(ctx.ui, runtime);
+				await runSetupWizard(ctx, runtime);
 				return;
 			}
 			if (command === "permissions" || command.startsWith("permissions ")) {
@@ -224,51 +231,10 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				ctx.ui.notify(`Antigravity tool activity: ${requested}`, "info");
 				return;
 			}
-			if (command === "tool-bridge" || command.startsWith("tool-bridge ")) {
-				let requested = command.slice("tool-bridge".length).trim().toLowerCase();
-				if (!requested) {
-					const choices = [
-						"ecosystem — bridge only ecosystem tools (engram, codegraph, subagents) and let Antigravity use its native core tools (default)",
-						"all — bridge all active Pi tools via MCP",
-					];
-					const selected = await ctx.ui.select("Antigravity Pi MCP tool bridge", choices);
-					if (!selected) return;
-					requested = selected.split(" ", 1)[0]!;
-				}
-				if (!isToolBridgeMode(requested)) {
-					ctx.ui.notify("Usage: /antigravity-acp tool-bridge [all|ecosystem]", "warning");
-					return;
-				}
-				runtime.setToolBridgeMode(requested);
-				saveToolBridgeMode(requested);
-				ctx.ui.notify(`Antigravity Pi MCP tool bridge: ${requested}`, "info");
-				return;
-			}
-				if (command === "isolated-home" || command.startsWith("isolated-home ")) {
-				let requested = command.slice("isolated-home".length).trim().toLowerCase();
-				if (!requested) {
-					const choices = [
-						"off — inherit ~/.gemini directly",
-						"on — isolate GEMINI_HOME so ~/.gemini/GEMINI.md, config and skills are not loaded twice (default)",
-					];
-					const selected = await ctx.ui.select("Antigravity isolated GEMINI_HOME", choices);
-					if (!selected) return;
-					requested = selected.split(" ", 1)[0]!;
-				}
-				if (requested !== "on" && requested !== "off") {
-					ctx.ui.notify("Usage: /antigravity-acp isolated-home [on|off]", "warning");
-					return;
-				}
-				const enabled = requested === "on";
-				runtime.setIsolatedGeminiHome(enabled);
-				saveIsolatedGeminiHome(enabled);
-				ctx.ui.notify(`Antigravity isolated GEMINI_HOME: ${requested} (applies to new connections)`, "info");
-				return;
-			}
-		const verbose = command === "doctor --verbose";
+			const verbose = command === "doctor --verbose";
 			if (command !== "doctor" && command !== "status" && !verbose) {
 				ctx.ui.notify(
-					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity|tool-bridge|isolated-home]",
+					"Usage: /antigravity-acp [setup|doctor|status|quota|update|updates|logout|account|qualify|permissions|tool-activity]",
 					"warning",
 				);
 				return;
@@ -280,7 +246,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				entry = error instanceof Error ? error.message : String(error);
 			}
 			const snapshot = await runtime.snapshot(verbose);
-			const auth = inspectAntigravityAuth();
+			const auth = runtime.inspectLocalAuth();
 			const setup = inspectRuntimeSetup();
 			const update = await checkAntigravityAcpUpdate().catch(() => undefined);
 			ctx.ui.notify(
@@ -289,17 +255,16 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					`Runtime: installed=${setup.installedVersion ?? "external/unknown"} approved=${update?.approvedVersion ?? setup.approvedVersion} registry=${update?.latestVersion ?? "unavailable"} updates=${setup.updateMode}; ACP SDK ${ACP_SDK_VERSION}, protocol ${ACP_PROTOCOL_VERSION}`,
 					`Antigravity server: ${entry}`,
 					`Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
-					`Credential storage (preflight): ${describeCredentialStorage()}`,
+					`Credential storage (preflight): ${describeCredentialStorage({ env: providerAcpEnvironment() })}`,
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
 					`Tool activity mode: ${snapshot.toolActivityMode}`,
-					`Tool bridge mode: ${snapshot.toolBridgeMode}`,
-					`Isolated GEMINI_HOME: ${snapshot.isolatedGeminiHome ? "on" : "off"}`,
 					`Active bindings: ${snapshot.bindings}`,
 					formatMetrics(snapshot.metrics),
 					...snapshot.processes.flatMap((item) => [
-						`• pid=${item.pid ?? "?"} generation=${item.generation} model=${item.modelId} confirmedMode=${item.confirmedPermissionMode} alive=${item.alive} restored=${item.restored} agent=${item.agentVersion ?? "?"} mcpHttp=${item.mcpHttp} permission=${item.waitingForPermission} tools=${item.waitingForTools} ignoredStdoutNoise=${item.ignoredStdoutNoiseLines}`,
+						`• pid=${item.pid ?? "?"} generation=${item.generation} model=${item.modelId} confirmedMode=${item.confirmedPermissionMode} acpMode=${item.confirmedAcpModeId} alive=${item.alive} restored=${item.restored} agent=${item.agentVersion ?? "?"} mcpHttp=${item.mcpHttp} permission=${item.waitingForPermission} tools=${item.waitingForTools} ignoredStdoutNoise=${item.ignoredStdoutNoiseLines}`,
 						`  omitted Pi tools: ${item.omittedTools.length ? item.omittedTools.map((tool) => `${tool.name} (${tool.reason})`).join("; ") : "none"}`,
 						...(verbose && item.stderrTail ? [`  stderr (redacted): ${item.stderrTail}`] : []),
+						...(item.diagnosticsPath ? [`  diagnostics: ${item.diagnosticsPath}`] : []),
 					]),
 				].join("\n"),
 				"info",
@@ -313,6 +278,7 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		modelRegistry = ctx.modelRegistry;
 		if (loadConfig().runtimeUpdates !== "notify") return;
 		try {
 			const update = await checkAntigravityAcpUpdate();

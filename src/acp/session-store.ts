@@ -7,6 +7,7 @@ export interface SavedSessionRecord {
 	piSessionId: string;
 	acpSessionId: string;
 	acpModelId: string;
+	credentialId: string;
 	cwd: string;
 	messageCount: number;
 	historyFingerprint: string;
@@ -76,6 +77,7 @@ function validRecord(value: unknown): value is SavedSessionRecord {
 		typeof record.piSessionId === "string" &&
 		typeof record.acpSessionId === "string" &&
 		typeof record.acpModelId === "string" &&
+		typeof record.credentialId === "string" &&
 		typeof record.cwd === "string" &&
 		Number.isSafeInteger(record.messageCount) &&
 		(record.messageCount ?? -1) >= 0 &&

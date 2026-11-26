@@ -17,6 +17,10 @@ describe("headless OAuth detection", () => {
 		expect(shouldUseHeadlessOAuth({ DISPLAY: ":0" }, "linux")).toBe(false);
 	});
 
+	it("does not enable the unsupported Windows relay automatically over SSH", () => {
+		expect(shouldUseHeadlessOAuth({ SSH_TTY: "ssh" }, "win32")).toBe(false);
+	});
+
 	it("honors an explicit mode override", () => {
 		expect(
 			shouldUseHeadlessOAuth({ PI_ANTIGRAVITY_ACP_OAUTH_MODE: "manual", DISPLAY: ":0" }, "linux"),
@@ -45,7 +49,10 @@ describe.skipIf(process.platform === "win32")("headless OAuth relay", () => {
 		try {
 			await run(browser, [authorizationUrl], relay.env);
 			const captured = await relay.waitForAuthorization();
-			expect(captured.url).toBe(authorizationUrl);
+			const shown = new URL(captured.url);
+			expect(shown.searchParams.get("prompt")).toBe("consent select_account");
+			shown.searchParams.set("prompt", "consent");
+			expect(shown.toString()).toBe(authorizationUrl);
 			await relay.forwardCallback(`${redirect}?state=state-123&code=one-time-code`, captured);
 			expect(received?.searchParams.get("state")).toBe("state-123");
 			expect(received?.searchParams.get("code")).toBe("one-time-code");
@@ -117,6 +124,7 @@ function authorization(redirect: string, state: string): string {
 	url.searchParams.set("client_id", "test-client");
 	url.searchParams.set("redirect_uri", redirect);
 	url.searchParams.set("state", state);
+	url.searchParams.set("prompt", "consent");
 	return url.toString();
 }
 

@@ -5,7 +5,7 @@ import net from "node:net";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 
-import { PiMcpBridge, piToolFingerprint, planToolProjection } from "../src/mcp/bridge.js";
+import { PiMcpBridge } from "../src/mcp/bridge.js";
 
 const tools: Tool[] = [
 	{
@@ -107,59 +107,6 @@ describe("PiMcpBridge", () => {
 		} finally {
 			await client.close();
 			await bridge.close();
-		}
-	});
-
-	it("keeps every core Pi tool by default and omits exactly the core tools in ecosystem mode", async () => {
-		const coreNames = ["read", "write", "edit", "bash", "grep", "find", "ls"];
-		const mixedTools: Tool[] = [...coreNames, "mem_search", "subagent_run"].map((name) => ({
-			name,
-			description: name,
-			parameters: Type.Object({ input: Type.String() }),
-		}));
-
-		expect(planToolProjection(mixedTools)).toEqual([]);
-		expect(piToolFingerprint(mixedTools)).toBe(piToolFingerprint(mixedTools, "all"));
-		expect(piToolFingerprint(mixedTools, "ecosystem")).not.toBe(piToolFingerprint(mixedTools));
-		expect(planToolProjection(mixedTools, "ecosystem").map((item) => item.name)).toEqual(coreNames);
-
-		const bridge = new PiMcpBridge({
-			tools: mixedTools,
-			onCall: async () => ({ content: [{ type: "text", text: "ok" }] }),
-		});
-		expect(bridge.omissions).toEqual([]);
-		const descriptor = await bridge.start();
-		if (!descriptor || !("url" in descriptor)) throw new Error("bridge did not start");
-		const headers = Object.fromEntries(descriptor.headers.map((header) => [header.name, header.value]));
-		const client = new Client({ name: "all-tools-test", version: "1" }, { capabilities: {} });
-		const transport = new StreamableHTTPClientTransport(new URL(descriptor.url), { requestInit: { headers } });
-		try {
-			await client.connect(transport as Parameters<typeof client.connect>[0]);
-			const listed = await client.listTools();
-			expect(listed.tools.map((tool) => tool.name)).toEqual(mixedTools.map((tool) => `pi_${tool.name}`));
-		} finally {
-			await client.close();
-			await bridge.close();
-		}
-
-		const ecosystemBridge = new PiMcpBridge({
-			tools: mixedTools,
-			toolBridgeMode: "ecosystem",
-			onCall: async () => ({ content: [{ type: "text", text: "ok" }] }),
-		});
-		expect(ecosystemBridge.omissions.map((item) => item.name)).toEqual(coreNames);
-		const ecoDescriptor = await ecosystemBridge.start();
-		if (!ecoDescriptor || !("url" in ecoDescriptor)) throw new Error("ecosystem bridge did not start");
-		const ecoHeaders = Object.fromEntries(ecoDescriptor.headers.map((header) => [header.name, header.value]));
-		const ecoClient = new Client({ name: "eco-tools-test", version: "1" }, { capabilities: {} });
-		const ecoTransport = new StreamableHTTPClientTransport(new URL(ecoDescriptor.url), { requestInit: { headers: ecoHeaders } });
-		try {
-			await ecoClient.connect(ecoTransport as Parameters<typeof ecoClient.connect>[0]);
-			const listed = await ecoClient.listTools();
-			expect(listed.tools.map((tool) => tool.name)).toEqual(["pi_mem_search", "pi_subagent_run"]);
-		} finally {
-			await ecoClient.close();
-			await ecosystemBridge.close();
 		}
 	});
 

@@ -170,34 +170,35 @@ describe("managed runtime executable permissions", () => {
 });
 
 describe("default auth profile", () => {
-	it("seeds the scoped profile under GEMINI_HOME and leaves the default profile alone", async () => {
-		const scopedHome = temporaryDirectory();
-		const defaultSettings = path.join(os.homedir(), ".gemini", "antigravity-acp", "settings.json");
-		const before = fs.existsSync(defaultSettings) ? fs.readFileSync(defaultSettings, "utf8") : undefined;
+	it("seeds the Pi-owned profile and leaves GEMINI_HOME alone", async () => {
+		const agentDir = temporaryDirectory();
+		const sharedHome = temporaryDirectory();
+		const sharedDirectory = path.join(sharedHome, "antigravity-acp");
+		fs.mkdirSync(sharedDirectory);
+		const sharedSettings = path.join(sharedDirectory, "settings.json");
+		fs.writeFileSync(sharedSettings, '{"other-client":true}');
 		const binary = path.join(temporaryDirectory(), "external-agent");
 		fs.writeFileSync(binary, "external", { mode: 0o755 });
 		vi.stubEnv("AGY_ACP_BIN", binary);
-		vi.stubEnv("GEMINI_HOME", scopedHome);
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		vi.stubEnv("GEMINI_HOME", sharedHome);
 		vi.stubEnv("GEMINI_API_KEY", "");
 		await ensureAntigravityAcpReady();
-		expect(JSON.parse(fs.readFileSync(path.join(scopedHome, "antigravity-acp", "settings.json"), "utf8"))).toMatchObject({
-			auth: { type: "oauth-personal" },
-		});
-		const after = fs.existsSync(defaultSettings) ? fs.readFileSync(defaultSettings, "utf8") : undefined;
-		expect(after).toBe(before);
+		const settings = path.join(agentDir, "antigravity-acp-provider", "gemini", "antigravity-acp", "settings.json");
+		expect(JSON.parse(fs.readFileSync(settings, "utf8"))).toMatchObject({ auth: { type: "oauth-personal" } });
+		expect(fs.readFileSync(sharedSettings, "utf8")).toBe('{"other-client":true}');
 	});
 
 	it("records an API key in the scoped profile", async () => {
-		const scopedHome = temporaryDirectory();
+		const agentDir = temporaryDirectory();
 		const binary = path.join(temporaryDirectory(), "external-agent");
 		fs.writeFileSync(binary, "external", { mode: 0o755 });
 		vi.stubEnv("AGY_ACP_BIN", binary);
-		vi.stubEnv("GEMINI_HOME", scopedHome);
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 		vi.stubEnv("GEMINI_API_KEY", "scoped-key");
 		await ensureAntigravityAcpReady();
-		expect(JSON.parse(fs.readFileSync(path.join(scopedHome, "antigravity-acp", "settings.json"), "utf8"))).toMatchObject({
-			auth: { type: "gemini-api-key" },
-		});
+		const settings = path.join(agentDir, "antigravity-acp-provider", "gemini", "antigravity-acp", "settings.json");
+		expect(JSON.parse(fs.readFileSync(settings, "utf8"))).toMatchObject({ auth: { type: "gemini-api-key" } });
 	});
 });
 
